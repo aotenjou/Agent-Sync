@@ -1,0 +1,39 @@
+{
+  "name": "git-agent-sync",
+  "version": "0.1.0",
+  "description": "Git-native MVP for syncing Codex and Claude Code session files across machines.",
+  "type": "module",
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "git-agent-sync": "./bin/git-agent-sync.js",
+    "agent-sync": "./bin/git-agent-sync.js"
+  },
+  "scripts": {
+    "smoke": "node ./bin/git-agent-sync.js --help"
+  },
+  "keywords": [
+    "git",
+    "codex",
+    "claude",
+    "sync",
+    "agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yourname/git-agent-sync.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourname/git-agent-sync/issues"
+  },
+  "homepage": "https://github.com/yourname/git-agent-sync#readme",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
