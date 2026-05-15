@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, copyFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, copyFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
@@ -9,6 +9,8 @@ const CONFIG_DIR = ".agent-sync";
 const CONFIG_FILE = ".agent-sync/config.json";
 const CACHE_FILE = ".agent-sync/last-scan.json";
 const DEFAULT_AGENT_DIR = ".agent-sync-store";
+const DEFAULT_STORE_GITIGNORE = "node_modules/\n.DS_Store\nThumbs.db\n";
+const DEFAULT_STORE_BRANCH = "main";
 const SUPPORTED_AGENTS = ["codex", "claude"];
 
 export async function main(argv) {
@@ -26,7 +28,7 @@ export async function main(argv) {
 
   const gitRoot = getGitRoot();
   const commands = {
-    init: () => initCommand(gitRoot, options),
+    init: () => initCommand(gitRoot, args, options),
     status: () => statusCommand(gitRoot, options),
     push: () => pushCommand(gitRoot, options),
     pull: () => pullCommand(gitRoot, options),
@@ -83,7 +85,7 @@ function printHelp() {
   console.log(`git-agent-sync ${TOOL_VERSION}
 
 Usage:
-  git agent-sync init [--remote <url>] [--store <path>]
+  git agent-sync init [--remote <url>|<url>] [--store <path>]
   git agent-sync status [--json]
   git agent-sync push
   git agent-sync pull
@@ -108,30 +110,37 @@ function getGitRoot() {
   return normalizePath(result.stdout.trim());
 }
 
-function initCommand(gitRoot, options) {
+function initCommand(gitRoot, args, options) {
   mkdirSync(join(gitRoot, CONFIG_DIR), { recursive: true });
 
   const projectName = basename(gitRoot);
   const storePath = normalizePath(resolve(gitRoot, options.store || DEFAULT_AGENT_DIR));
+  const remote = options.remote || args[0] || null;
+  const projectIdentity = getProjectIdentity(gitRoot);
+  const legacyProjectId = legacyProjectIdForPath(gitRoot);
   const config = {
     version: 1,
-    projectId: stableProjectId(gitRoot),
+    projectId: stableProjectId(projectName, projectIdentity),
+    projectIdentity,
+    legacyProjectIds: unique([legacyProjectId].filter(Boolean)),
     projectName,
     projectRoot: gitRoot,
     storePath,
-    remote: options.remote || null,
+    remote,
     agents: SUPPORTED_AGENTS,
     createdAt: new Date().toISOString()
   };
 
   ensureStoreRepo(storePath, config.remote);
-  writeJson(join(gitRoot, CONFIG_FILE), config);
+  adoptExistingProjectBundle(config);
+  writeConfig(gitRoot, config);
   writeGitignoreEntry(gitRoot, CONFIG_DIR);
   writeGitignoreEntry(gitRoot, DEFAULT_AGENT_DIR);
 
   console.log(`agent-sync initialized for ${projectName}`);
   console.log(`config: ${join(gitRoot, CONFIG_FILE)}`);
   console.log(`store:  ${storePath}`);
+  console.log(`project id: ${config.projectId}`);
   if (config.remote) {
     console.log(`remote: ${config.remote}`);
   }
@@ -157,6 +166,9 @@ function scanCommand(gitRoot, options) {
 function pushCommand(gitRoot) {
   const config = readConfig(gitRoot);
   ensureStoreRepo(config.storePath, config.remote);
+  syncStoreFromRemote(config.storePath, config.remote);
+  adoptExistingProjectBundle(config);
+  writeConfig(gitRoot, config);
   const scan = scanSessions(gitRoot, config);
   writeJson(join(gitRoot, CACHE_FILE), scan);
 
@@ -173,7 +185,7 @@ function pushCommand(gitRoot) {
   }
 
   if (config.remote) {
-    runGit(["push", "-u", "origin", "main"], config.storePath);
+    runGit(["push", "-u", "origin", DEFAULT_STORE_BRANCH], config.storePath);
     console.log("agent-sync: pushed sidecar repo.");
   }
 }
@@ -183,16 +195,24 @@ function pullCommand(gitRoot) {
   ensureStoreRepo(config.storePath, config.remote);
 
   if (config.remote) {
-    runGit(["pull", "--ff-only"], config.storePath);
+    const pulled = syncStoreFromRemote(config.storePath, config.remote);
+    if (!pulled) {
+      console.log(`agent-sync: remote has no ${DEFAULT_STORE_BRANCH} branch yet; push from a machine with sessions first.`);
+    }
     console.log("agent-sync: pulled sidecar repo.");
+    adoptExistingProjectBundle(config);
+    writeConfig(gitRoot, config);
   } else {
     console.log("agent-sync: no remote configured; local sidecar store is already available.");
   }
 
-  const manifestPath = join(config.storePath, "projects", config.projectId, "manifest.json");
-  if (existsSync(manifestPath)) {
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const bundle = findProjectBundle(config);
+  if (bundle) {
+    const manifest = readJson(bundle.manifestPath);
     console.log(`agent-sync: ${manifest.matches.length} session file(s) available for restore.`);
+    if (bundle.projectId !== config.projectId) {
+      console.log(`agent-sync: using compatible project bundle ${bundle.projectId}.`);
+    }
   }
 }
 
@@ -203,12 +223,12 @@ function restoreCommand(gitRoot, args, options) {
     throw new Error("restore requires a bundle id, or pass --all");
   }
 
-  const manifestPath = join(config.storePath, "projects", config.projectId, "manifest.json");
-  if (!existsSync(manifestPath)) {
+  const bundle = findProjectBundle(config);
+  if (!bundle) {
     throw new Error("no manifest found in sidecar store. Run pull first.");
   }
 
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const manifest = readJson(bundle.manifestPath);
   const matches = options.all ? manifest.matches : manifest.matches.filter((item) => item.bundleId === bundleId);
   if (!matches.length) {
     throw new Error(`no bundle found for "${bundleId}"`);
@@ -216,7 +236,7 @@ function restoreCommand(gitRoot, args, options) {
 
   for (const match of matches) {
     const source = join(config.storePath, match.storeRelativePath);
-    const target = expandHome(match.originalPath);
+    const target = getRestoreTarget(match);
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(source, target);
     console.log(`restored ${match.agent}: ${target}`);
@@ -254,6 +274,9 @@ function doctorCommand(gitRoot) {
   if (config) {
     checks.push(["store", existsSync(config.storePath) ? config.storePath : "missing"]);
     checks.push(["remote", config.remote || "none"]);
+    checks.push(["identity", config.projectIdentity]);
+    checks.push(["project id", config.projectId]);
+    checks.push(["legacy id", config.legacyProjectIds?.join(", ") || "none"]);
   }
   for (const [label, value] of checks) {
     console.log(`${label.padEnd(10)} ${value}`);
@@ -264,6 +287,7 @@ function scanSessions(gitRoot, config) {
   const needles = unique([
     normalizePath(gitRoot),
     normalizePath(gitRoot).replaceAll("/", "\\"),
+    normalizeRemoteUrl(getProjectRemote(gitRoot) || ""),
     basename(gitRoot),
     config.projectName
   ].filter(Boolean));
@@ -285,6 +309,7 @@ function scanSessions(gitRoot, config) {
         agent: candidate.agent,
         originalPath: shrinkHome(candidate.path),
         absolutePath: candidate.path,
+        agentRelativePath: toSlash(relative(candidate.root, candidate.path)),
         bytes: Buffer.byteLength(content),
         sha256: hash,
         bundleId: `${candidate.agent}-${hash.slice(0, 12)}`,
@@ -299,6 +324,7 @@ function scanSessions(gitRoot, config) {
     version: 1,
     scannedAt: new Date().toISOString(),
     projectId: config.projectId,
+    projectIdentity: config.projectIdentity,
     projectName: config.projectName,
     projectRoot: gitRoot,
     candidates: candidates.length,
@@ -312,7 +338,7 @@ function findAgentFiles(agent, root) {
   }
   return walk(root)
     .filter((file) => file.endsWith(".jsonl") || file.endsWith(".json"))
-    .map((path) => ({ agent, path: normalizePath(path) }));
+    .map((path) => ({ agent, path: normalizePath(path), root: normalizePath(root) }));
 }
 
 function getAgentRoot(agent) {
@@ -323,6 +349,13 @@ function getAgentRoot(agent) {
     return process.env.AGENT_SYNC_CLAUDE_DIR || join(homedir(), ".claude", "projects");
   }
   throw new Error(`unsupported agent "${agent}"`);
+}
+
+function getRestoreTarget(match) {
+  if (match.agentRelativePath) {
+    return join(getAgentRoot(match.agent), match.agentRelativePath);
+  }
+  return expandHome(match.originalPath);
 }
 
 function walk(root) {
@@ -374,6 +407,9 @@ function writeManifest(config, scan) {
     ...scan,
     tool: "git-agent-sync",
     toolVersion: TOOL_VERSION,
+    projectIdentity: config.projectIdentity,
+    projectRemote: getProjectRemote(config.projectRoot),
+    legacyProjectIds: config.legacyProjectIds || [],
     matches: scan.matches.map(({ absolutePath, ...item }) => item)
   };
   writeJson(join(config.storePath, "projects", config.projectId, "manifest.json"), manifest);
@@ -381,6 +417,7 @@ function writeManifest(config, scan) {
 
 function printScan(scan, config) {
   console.log(`project: ${scan.projectName}`);
+  console.log(`id:      ${config.projectId}`);
   console.log(`store:   ${config.storePath}`);
   console.log(`scan:    ${scan.candidates} candidate file(s), ${scan.matches.length} match(es)`);
   if (!scan.matches.length) {
@@ -397,19 +434,40 @@ function readConfig(gitRoot) {
   if (!existsSync(path)) {
     throw new Error("agent-sync is not initialized. Run \"git agent-sync init\" first.");
   }
-  return JSON.parse(readFileSync(path, "utf8"));
+  const config = readJson(path);
+  const projectName = config.projectName || basename(gitRoot);
+  const projectIdentity = config.projectIdentity || getProjectIdentity(gitRoot);
+  const legacyProjectId = legacyProjectIdForPath(gitRoot);
+  const stableId = stableProjectId(projectName, projectIdentity);
+  const configuredProjectId = config.projectId;
+  const isLegacyConfig = !config.projectIdentity;
+  const migrated = {
+    ...config,
+    projectName,
+    projectRoot: gitRoot,
+    storePath: normalizePath(resolve(gitRoot, config.storePath || DEFAULT_AGENT_DIR)),
+    projectIdentity,
+    projectId: isLegacyConfig ? stableId : config.projectId || stableId,
+    legacyProjectIds: unique([...(config.legacyProjectIds || []), configuredProjectId, legacyProjectId].filter(Boolean))
+  };
+  adoptExistingProjectBundle(migrated);
+  return migrated;
+}
+
+function writeConfig(gitRoot, config) {
+  writeJson(join(gitRoot, CONFIG_FILE), config);
 }
 
 function ensureStoreRepo(storePath, remote) {
   mkdirSync(storePath, { recursive: true });
   if (!existsSync(join(storePath, ".git"))) {
-    runGit(["init", "-b", "main"], storePath);
+    runGit(["init", "-b", DEFAULT_STORE_BRANCH], storePath);
   }
   runGit(["config", "user.name", "agent-sync"], storePath);
   runGit(["config", "user.email", "agent-sync@example.invalid"], storePath);
   const gitignore = join(storePath, ".gitignore");
   if (!existsSync(gitignore)) {
-    writeFileSync(gitignore, "node_modules/\n.DS_Store\nThumbs.db\n");
+    writeFileSync(gitignore, DEFAULT_STORE_GITIGNORE);
   }
   if (remote) {
     const current = runGit(["remote", "get-url", "origin"], storePath, { allowFail: true });
@@ -421,6 +479,44 @@ function ensureStoreRepo(storePath, remote) {
   }
 }
 
+function syncStoreFromRemote(storePath, remote) {
+  if (!remote) {
+    return false;
+  }
+
+  const remoteHead = runGit(["ls-remote", "--heads", "origin", DEFAULT_STORE_BRANCH], storePath, { allowFail: true });
+  if (remoteHead.status !== 0 || !remoteHead.stdout.trim()) {
+    return false;
+  }
+
+  runGit(["fetch", "origin", DEFAULT_STORE_BRANCH], storePath);
+  const branch = runGit(["rev-parse", "--verify", DEFAULT_STORE_BRANCH], storePath, { allowFail: true });
+  if (branch.status !== 0) {
+    removeBootstrapGitignore(storePath);
+    runGit(["checkout", "-B", DEFAULT_STORE_BRANCH, `origin/${DEFAULT_STORE_BRANCH}`], storePath);
+    return true;
+  }
+
+  const upstream = runGit(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], storePath, { allowFail: true });
+  if (upstream.status !== 0 || upstream.stdout.trim() !== `origin/${DEFAULT_STORE_BRANCH}`) {
+    runGit(["branch", "--set-upstream-to", `origin/${DEFAULT_STORE_BRANCH}`, DEFAULT_STORE_BRANCH], storePath);
+  }
+  runGit(["pull", "--ff-only"], storePath);
+  return true;
+}
+
+function removeBootstrapGitignore(storePath) {
+  const gitignore = join(storePath, ".gitignore");
+  if (!existsSync(gitignore)) {
+    return;
+  }
+  const status = runGit(["status", "--porcelain", "--", ".gitignore"], storePath, { allowFail: true });
+  const content = readFileSync(gitignore, "utf8");
+  if (status.stdout.trim() === "?? .gitignore" && content === DEFAULT_STORE_GITIGNORE) {
+    unlinkSync(gitignore);
+  }
+}
+
 function writeGitignoreEntry(gitRoot, entry) {
   const gitignore = join(gitRoot, ".gitignore");
   const line = `${entry}/`;
@@ -428,6 +524,107 @@ function writeGitignoreEntry(gitRoot, entry) {
   if (!existing.split(/\r?\n/).includes(line)) {
     writeFileSync(gitignore, `${existing}${existing.endsWith("\n") || existing.length === 0 ? "" : "\n"}${line}\n`);
   }
+}
+
+function adoptExistingProjectBundle(config) {
+  const bundle = findProjectBundle(config);
+  if (!bundle || bundle.projectId === config.projectId) {
+    return;
+  }
+  config.projectId = bundle.projectId;
+  config.legacyProjectIds = unique([...(config.legacyProjectIds || []), bundle.projectId]);
+}
+
+function findProjectBundle(config) {
+  const projectsDir = join(config.storePath, "projects");
+  const directIds = unique([config.projectId, ...(config.legacyProjectIds || [])].filter(Boolean));
+  for (const projectId of directIds) {
+    const manifestPath = join(projectsDir, projectId, "manifest.json");
+    if (existsSync(manifestPath)) {
+      return { projectId, manifestPath };
+    }
+  }
+
+  if (!existsSync(projectsDir)) {
+    return null;
+  }
+
+  const candidates = readdirSync(projectsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const manifestPath = join(projectsDir, entry.name, "manifest.json");
+      if (!existsSync(manifestPath)) {
+        return null;
+      }
+      const manifest = readJson(manifestPath);
+      const score = scoreProjectManifest(config, manifest);
+      return { projectId: entry.name, manifestPath, score };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score || a.projectId.localeCompare(b.projectId));
+
+  return candidates[0]?.score > 0 ? candidates[0] : null;
+}
+
+function scoreProjectManifest(config, manifest) {
+  let score = 0;
+  if (manifest.projectId && config.legacyProjectIds?.includes(manifest.projectId)) {
+    score += 5;
+  }
+  if (manifest.legacyProjectIds?.includes(config.projectId)) {
+    score += 5;
+  }
+  if (manifest.projectIdentity && manifest.projectIdentity === config.projectIdentity) {
+    score += 4;
+  }
+  if (manifest.projectName && manifest.projectName === config.projectName) {
+    score += 2;
+  }
+  const manifestRepo = normalizeRemoteUrl(manifest.projectRemote || manifest.remote || "");
+  if (manifestRepo && `git:${manifestRepo}` === config.projectIdentity) {
+    score += 4;
+  }
+  return score;
+}
+
+function getProjectIdentity(gitRoot) {
+  const remote = getProjectRemote(gitRoot);
+  if (remote) {
+    return `git:${normalizeRemoteUrl(remote)}`;
+  }
+  return `name:${basename(gitRoot)}`;
+}
+
+function getProjectRemote(gitRoot) {
+  const origin = runGit(["config", "--get", "remote.origin.url"], gitRoot, { allowFail: true });
+  if (origin.status === 0 && origin.stdout.trim()) {
+    return origin.stdout.trim();
+  }
+  const remotes = runGit(["remote"], gitRoot, { allowFail: true });
+  if (remotes.status !== 0) {
+    return null;
+  }
+  const firstRemote = remotes.stdout.split(/\r?\n/).find(Boolean);
+  if (!firstRemote) {
+    return null;
+  }
+  const url = runGit(["config", "--get", `remote.${firstRemote}.url`], gitRoot, { allowFail: true });
+  return url.status === 0 && url.stdout.trim() ? url.stdout.trim() : null;
+}
+
+function normalizeRemoteUrl(remote) {
+  const value = remote.trim();
+  if (!value) {
+    return "";
+  }
+  let normalized = value.replace(/^git\+/, "").replace(/\.git$/i, "");
+  const ssh = normalized.match(/^git@([^:]+):(.+)$/);
+  if (ssh) {
+    normalized = `https://${ssh[1]}/${ssh[2]}`;
+  }
+  normalized = normalized.replace(/^ssh:\/\/git@([^/]+)\//, "https://$1/");
+  normalized = normalized.replace(/^https?:\/\//i, "").toLowerCase();
+  return normalized;
 }
 
 function runGit(args, cwd, options = {}) {
@@ -443,7 +640,15 @@ function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-function stableProjectId(gitRoot) {
+function readJson(path) {
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+function stableProjectId(projectName, projectIdentity) {
+  return `${projectName}-${sha256(projectIdentity).slice(0, 10)}`;
+}
+
+function legacyProjectIdForPath(gitRoot) {
   return `${basename(gitRoot)}-${sha256(normalizePath(gitRoot)).slice(0, 10)}`;
 }
 
