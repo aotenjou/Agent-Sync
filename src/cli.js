@@ -11,6 +11,7 @@ const CACHE_FILE = ".agent-sync/last-scan.json";
 const DEFAULT_AGENT_DIR = ".agent-sync-store";
 const DEFAULT_STORE_GITIGNORE = "node_modules/\n.DS_Store\nThumbs.db\n";
 const DEFAULT_STORE_BRANCH = "main";
+const BINDINGS_FILE = "bindings.jsonl";
 const SUPPORTED_AGENTS = ["codex", "claude"];
 
 export async function main(argv) {
@@ -30,6 +31,7 @@ export async function main(argv) {
   const commands = {
     init: () => initCommand(gitRoot, args, options),
     status: () => statusCommand(gitRoot, options),
+    list: () => listCommand(gitRoot, options),
     push: () => pushCommand(gitRoot, options),
     pull: () => pullCommand(gitRoot, options),
     scan: () => scanCommand(gitRoot, options),
@@ -65,6 +67,16 @@ function parseArgs(rawArgs) {
       options.yes = true;
     } else if (arg === "--all") {
       options.all = true;
+    } else if (arg === "--current") {
+      options.current = true;
+    } else if (arg.startsWith("--branch=")) {
+      options.branch = arg.slice("--branch=".length);
+    } else if (arg === "--branch") {
+      options.branch = rawArgs[++i];
+    } else if (arg.startsWith("--commit=")) {
+      options.commit = arg.slice("--commit=".length);
+    } else if (arg === "--commit") {
+      options.commit = rawArgs[++i];
     } else if (arg.startsWith("--remote=")) {
       options.remote = arg.slice("--remote=".length);
     } else if (arg === "--remote") {
@@ -87,10 +99,11 @@ function printHelp() {
 Usage:
   git agent-sync init [--remote <url>|<url>] [--store <path>]
   git agent-sync status [--json]
+  git agent-sync list --current|--branch <name>|--commit <sha> [--json]
   git agent-sync push
   git agent-sync pull
   git agent-sync scan [--json]
-  git agent-sync restore <bundle-id> [--all]
+  git agent-sync restore <bundle-id>|--all|--current|--branch <name>|--commit <sha>
   git agent-sync install-hooks
   git agent-sync doctor
 
@@ -163,17 +176,32 @@ function scanCommand(gitRoot, options) {
   return statusCommand(gitRoot, options);
 }
 
+function listCommand(gitRoot, options) {
+  const config = readConfig(gitRoot);
+  const selector = parseSelector(options, { requireSelector: true });
+  const bindings = queryBindings(config, selector, gitRoot);
+
+  if (options.json) {
+    console.log(JSON.stringify(bindings, null, 2));
+    return;
+  }
+
+  printBindings(bindings, selector);
+}
+
 function pushCommand(gitRoot) {
   const config = readConfig(gitRoot);
   ensureStoreRepo(config.storePath, config.remote);
   syncStoreFromRemote(config.storePath, config.remote);
   adoptExistingProjectBundle(config);
   writeConfig(gitRoot, config);
+  const gitContext = getGitContext(gitRoot);
   const scan = scanSessions(gitRoot, config);
   writeJson(join(gitRoot, CACHE_FILE), scan);
 
   const copied = copyMatchesToStore(config, scan);
-  writeManifest(config, scan);
+  writeManifest(config, scan, gitContext);
+  const bindingsAdded = writeBindings(config, scan.matches, gitContext);
 
   runGit(["add", "."], config.storePath);
   const diff = runGit(["diff", "--cached", "--quiet"], config.storePath, { allowFail: true });
@@ -181,7 +209,7 @@ function pushCommand(gitRoot) {
     console.log(`agent-sync: no sidecar changes (${copied.length} matched sessions).`);
   } else {
     runGit(["commit", "-m", `sync ${config.projectName} agent sessions`], config.storePath);
-    console.log(`agent-sync: committed ${copied.length} matched session file(s).`);
+    console.log(`agent-sync: committed ${copied.length} matched session file(s), ${bindingsAdded} new binding(s).`);
   }
 
   if (config.remote) {
@@ -219,8 +247,19 @@ function pullCommand(gitRoot) {
 function restoreCommand(gitRoot, args, options) {
   const config = readConfig(gitRoot);
   const bundleId = args[0];
-  if (!bundleId && !options.all) {
-    throw new Error("restore requires a bundle id, or pass --all");
+  const selector = parseSelector(options, { requireSelector: false });
+  const restoreModes = [Boolean(bundleId), Boolean(options.all), Boolean(selector)].filter(Boolean).length;
+  if (restoreModes !== 1) {
+    throw new Error("restore requires exactly one of a bundle id, --all, --current, --branch, or --commit");
+  }
+
+  if (selector) {
+    const matches = queryBindings(config, selector, gitRoot);
+    if (!matches.length) {
+      throw new Error(`no bindings found for ${formatSelector(selector)}`);
+    }
+    restoreMatches(config, matches);
+    return;
   }
 
   const bundle = findProjectBundle(config);
@@ -234,6 +273,10 @@ function restoreCommand(gitRoot, args, options) {
     throw new Error(`no bundle found for "${bundleId}"`);
   }
 
+  restoreMatches(config, matches);
+}
+
+function restoreMatches(config, matches) {
   for (const match of matches) {
     const source = join(config.storePath, match.storeRelativePath);
     const target = getRestoreTarget(match);
@@ -402,17 +445,129 @@ function copyMatchesToStore(config, scan) {
   return copied;
 }
 
-function writeManifest(config, scan) {
+function writeManifest(config, scan, gitContext = null) {
   const manifest = {
     ...scan,
     tool: "git-agent-sync",
     toolVersion: TOOL_VERSION,
     projectIdentity: config.projectIdentity,
     projectRemote: getProjectRemote(config.projectRoot),
+    gitContext,
     legacyProjectIds: config.legacyProjectIds || [],
     matches: scan.matches.map(({ absolutePath, ...item }) => item)
   };
   writeJson(join(config.storePath, "projects", config.projectId, "manifest.json"), manifest);
+}
+
+function writeBindings(config, matches, gitContext) {
+  if (!matches.length) {
+    return 0;
+  }
+
+  const existing = readBindings(config);
+  const seen = new Set(existing.map(bindingKey));
+  const additions = [];
+  const boundAt = new Date().toISOString();
+
+  for (const match of matches) {
+    const binding = {
+      version: 1,
+      boundAt,
+      projectId: config.projectId,
+      projectIdentity: config.projectIdentity,
+      bundleId: match.bundleId,
+      agent: match.agent,
+      sha256: match.sha256,
+      storeRelativePath: match.storeRelativePath,
+      originalPath: match.originalPath,
+      agentRelativePath: match.agentRelativePath,
+      branch: gitContext.branch,
+      headCommit: gitContext.headCommit,
+      baseCommit: gitContext.baseCommit,
+      dirty: gitContext.dirty
+    };
+    const key = bindingKey(binding);
+    if (!seen.has(key)) {
+      seen.add(key);
+      additions.push(binding);
+    }
+  }
+
+  if (!additions.length) {
+    return 0;
+  }
+
+  const bindingsPath = getBindingsPath(config);
+  mkdirSync(dirname(bindingsPath), { recursive: true });
+  const content = [...existing, ...additions].map((item) => JSON.stringify(item)).join("\n");
+  writeFileSync(bindingsPath, `${content}\n`);
+  return additions.length;
+}
+
+function readBindings(config) {
+  const bindingsPath = getBindingsPath(config);
+  if (!existsSync(bindingsPath)) {
+    return [];
+  }
+  return readFileSync(bindingsPath, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+function queryBindings(config, selector, gitRoot) {
+  const bindings = readBindings(config);
+  if (selector.type === "current") {
+    const context = getGitContext(gitRoot);
+    const commitMatches = filterBindingsByCommit(bindings, context.headCommit);
+    if (commitMatches.length || !context.branch) {
+      return dedupeBindings(commitMatches, "commit");
+    }
+    return dedupeBindings(filterBindingsByBranch(bindings, context.branch), "branch");
+  }
+  if (selector.type === "commit") {
+    return dedupeBindings(filterBindingsByCommit(bindings, selector.value), "commit");
+  }
+  if (selector.type === "branch") {
+    return dedupeBindings(filterBindingsByBranch(bindings, selector.value), "branch");
+  }
+  throw new Error(`unsupported selector "${selector.type}"`);
+}
+
+function filterBindingsByCommit(bindings, commit) {
+  return bindings.filter((binding) => matchesCommit(binding.headCommit, commit) || matchesCommit(binding.baseCommit, commit));
+}
+
+function filterBindingsByBranch(bindings, branch) {
+  return bindings.filter((binding) => binding.branch === branch);
+}
+
+function dedupeBindings(bindings, mode) {
+  const seen = new Set();
+  const result = [];
+  for (const binding of bindings) {
+    const key = mode === "commit" ? `${binding.bundleId}:${binding.headCommit}` : bindingKey(binding);
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(binding);
+    }
+  }
+  return result.sort((a, b) => {
+    const time = String(b.boundAt || "").localeCompare(String(a.boundAt || ""));
+    return time || a.bundleId.localeCompare(b.bundleId);
+  });
+}
+
+function matchesCommit(value, query) {
+  return Boolean(value && query && value.startsWith(query));
+}
+
+function bindingKey(binding) {
+  return `${binding.bundleId}:${binding.headCommit}:${binding.branch || ""}`;
+}
+
+function getBindingsPath(config) {
+  return join(config.storePath, "projects", config.projectId, BINDINGS_FILE);
 }
 
 function printScan(scan, config) {
@@ -427,6 +582,47 @@ function printScan(scan, config) {
   for (const match of scan.matches) {
     console.log(`- ${match.bundleId} ${match.agent} ${match.originalPath} (${match.bytes} bytes)`);
   }
+}
+
+function printBindings(bindings, selector) {
+  console.log(`selector: ${formatSelector(selector)}`);
+  console.log(`bindings: ${bindings.length}`);
+  for (const binding of bindings) {
+    const branch = binding.branch || "detached";
+    const dirty = binding.dirty ? "dirty" : "clean";
+    console.log(`- ${binding.bundleId} ${binding.agent} ${binding.headCommit} ${branch} ${dirty} ${binding.originalPath}`);
+  }
+}
+
+function parseSelector(options, { requireSelector }) {
+  const selectors = [
+    options.current ? { type: "current" } : null,
+    options.branch !== undefined ? { type: "branch", value: options.branch } : null,
+    options.commit !== undefined ? { type: "commit", value: options.commit } : null
+  ].filter(Boolean);
+
+  if (selectors.length > 1) {
+    throw new Error("choose only one of --current, --branch, or --commit");
+  }
+  if (!selectors.length) {
+    if (requireSelector) {
+      throw new Error("list requires one of --current, --branch, or --commit");
+    }
+    return null;
+  }
+
+  const selector = selectors[0];
+  if ((selector.type === "branch" || selector.type === "commit") && !selector.value) {
+    throw new Error(`--${selector.type} requires a value`);
+  }
+  return selector;
+}
+
+function formatSelector(selector) {
+  if (selector.type === "current") {
+    return "current";
+  }
+  return `${selector.type} ${selector.value}`;
 }
 
 function readConfig(gitRoot) {
@@ -610,6 +806,34 @@ function getProjectRemote(gitRoot) {
   }
   const url = runGit(["config", "--get", `remote.${firstRemote}.url`], gitRoot, { allowFail: true });
   return url.status === 0 && url.stdout.trim() ? url.stdout.trim() : null;
+}
+
+function getGitContext(gitRoot) {
+  const headCommit = getHeadCommit(gitRoot);
+  return {
+    branch: getCurrentBranch(gitRoot),
+    headCommit,
+    baseCommit: headCommit,
+    dirty: isWorktreeDirty(gitRoot)
+  };
+}
+
+function getCurrentBranch(gitRoot) {
+  const result = runGit(["symbolic-ref", "--quiet", "--short", "HEAD"], gitRoot, { allowFail: true });
+  return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : null;
+}
+
+function getHeadCommit(gitRoot) {
+  const result = runGit(["rev-parse", "HEAD"], gitRoot, { allowFail: true });
+  if (result.status !== 0 || !result.stdout.trim()) {
+    throw new Error("cannot read HEAD commit; commit the project at least once before syncing bindings");
+  }
+  return result.stdout.trim();
+}
+
+function isWorktreeDirty(gitRoot) {
+  const result = runGit(["status", "--porcelain"], gitRoot, { allowFail: true });
+  return result.status === 0 && Boolean(result.stdout.trim());
 }
 
 function normalizeRemoteUrl(remote) {

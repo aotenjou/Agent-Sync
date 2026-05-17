@@ -17,6 +17,8 @@
 - 把匹配到的会话复制到 sidecar Git 仓库 `.agent-sync-store/`
 - 支持把 sidecar 仓库推送到专门的私有远程仓库
 - 支持在另一台机器拉取 sidecar 仓库并恢复会话
+- 为每次同步的 session 记录轻量 Git 上下文绑定
+- 支持按当前 Git 状态、branch、commit 查询或恢复 session
 - 支持 `pre-push` hook，在业务仓库 `git push` 前自动同步会话
 - 使用业务仓库 remote 生成跨平台稳定的 `projectId`
 - 兼容旧版本按本地绝对路径生成的历史 bundle
@@ -65,6 +67,7 @@ git clone git@github.com:yourname/your-project.git
 cd your-project
 git agent-sync init --remote git@github.com:yourname/agent-session-store.git
 git agent-sync pull
+git agent-sync list --current
 git agent-sync restore --all
 ```
 
@@ -105,11 +108,17 @@ git-agent-sync push
 ```bash
 git agent-sync init [--remote <url>|<url>] [--store <path>]
 git agent-sync status [--json]
+git agent-sync list --current [--json]
+git agent-sync list --branch <name> [--json]
+git agent-sync list --commit <sha> [--json]
 git agent-sync scan [--json]
 git agent-sync push
 git agent-sync pull
 git agent-sync restore <bundle-id>
 git agent-sync restore --all
+git agent-sync restore --current
+git agent-sync restore --branch <name>
+git agent-sync restore --commit <sha>
 git agent-sync install-hooks
 git agent-sync doctor
 ```
@@ -139,6 +148,35 @@ git agent-sync doctor
 }
 ```
 
+## Git 上下文绑定
+
+每次 `push` 会在 sidecar project bundle 中写入一个轻量历史索引：
+
+```text
+.agent-sync-store/
+  projects/
+    <project-id>/
+      bindings.jsonl
+```
+
+`manifest.json` 仍然表示最新快照。`bindings.jsonl` 用于历史查询，会记录 session bundle、同步时的 branch、`HEAD` commit、`baseCommit`，以及业务工作区当时是否 dirty。
+
+```bash
+git agent-sync list --current
+git agent-sync list --branch main
+git agent-sync list --commit 4f7c2a1
+```
+
+恢复命令也支持相同 selector：
+
+```bash
+git agent-sync restore --current
+git agent-sync restore --branch main
+git agent-sync restore --commit 4f7c2a1
+```
+
+commit 是主要查询锚点。`--current` 会先匹配当前 `HEAD` commit；如果没有结果，再回退匹配当前 branch。branch 只是同步发生时的历史标签，不代表会跟随可变分支指针。detached HEAD 同步时会记录 `branch: null`，仍然可以通过 commit 查询。
+
 ## 本地目录结构
 
 初始化后，业务项目里会出现：
@@ -164,6 +202,7 @@ git agent-sync doctor
   projects/
     <project-id>/
       manifest.json
+      bindings.jsonl
       codex/
         codex-<hash>.jsonl
       claude/

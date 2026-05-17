@@ -12,6 +12,8 @@ It solves one specific problem: source code can move with `git clone`, but local
 - Copies matched sessions into a sidecar Git repo at `.agent-sync-store/`
 - Pushes and pulls that sidecar repo without adding sessions to your project commits
 - Restores pulled sessions back into the local Codex or Claude session directory
+- Records lightweight Git context bindings for each pushed session
+- Lists or restores sessions by the current Git state, branch, or commit
 - Uses a cross-platform project identity based on the project Git remote when available
 - Falls back to legacy path-based bundles so older stores still restore
 
@@ -56,6 +58,7 @@ git clone git@github.com:you/your-project.git
 cd your-project
 git agent-sync init --remote git@github.com:you/agent-session-store.git
 git agent-sync pull
+git agent-sync list --current
 git agent-sync restore --all
 ```
 
@@ -84,11 +87,17 @@ git push
 ```bash
 git agent-sync init [--remote <url>|<url>] [--store <path>]
 git agent-sync status [--json]
+git agent-sync list --current [--json]
+git agent-sync list --branch <name> [--json]
+git agent-sync list --commit <sha> [--json]
 git agent-sync scan [--json]
 git agent-sync push
 git agent-sync pull
 git agent-sync restore <bundle-id>
 git agent-sync restore --all
+git agent-sync restore --current
+git agent-sync restore --branch <name>
+git agent-sync restore --commit <sha>
 git agent-sync install-hooks
 git agent-sync doctor
 ```
@@ -118,6 +127,35 @@ Example config:
 }
 ```
 
+## Git Context Bindings
+
+Each `push` writes a lightweight historical index at:
+
+```text
+.agent-sync-store/
+  projects/
+    <project-id>/
+      bindings.jsonl
+```
+
+`manifest.json` remains the latest snapshot. `bindings.jsonl` is used for historical lookup and records the session bundle, branch, `HEAD` commit, `baseCommit`, and whether the project worktree was dirty when the session was synced.
+
+```bash
+git agent-sync list --current
+git agent-sync list --branch main
+git agent-sync list --commit 4f7c2a1
+```
+
+Restore can use the same selectors:
+
+```bash
+git agent-sync restore --current
+git agent-sync restore --branch main
+git agent-sync restore --commit 4f7c2a1
+```
+
+Commit matching is the primary lookup path. `--current` first matches the current `HEAD` commit, then falls back to the current branch if no commit binding exists. Branches are historical labels from sync time; they do not follow mutable branch pointers. Detached HEAD syncs store `branch: null` and remain queryable by commit.
+
 ## Local Files
 
 Initialization creates:
@@ -143,6 +181,7 @@ Both directories are added to the project `.gitignore`.
   projects/
     <project-id>/
       manifest.json
+      bindings.jsonl
       codex/
         codex-<hash>.jsonl
       claude/
