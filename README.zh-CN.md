@@ -17,6 +17,7 @@
 - 把匹配到的会话复制到 sidecar Git 仓库 `.agent-sync-store/`
 - 支持把 sidecar 仓库推送到专门的私有远程仓库
 - 支持在另一台机器拉取 sidecar 仓库并恢复会话
+- 支持恢复时对跨平台 Codex session 做轻量适配，不修改 sidecar 原文件
 - 为每次同步的 session 记录轻量 Git 上下文绑定
 - 支持按当前 Git 状态、branch、commit 查询或恢复 session
 - 支持 `pre-push` hook，在业务仓库 `git push` 前自动同步会话
@@ -119,6 +120,7 @@ git agent-sync restore --all
 git agent-sync restore --current
 git agent-sync restore --branch <name>
 git agent-sync restore --commit <sha>
+git agent-sync restore --current --no-adapt
 git agent-sync install-hooks
 git agent-sync doctor
 ```
@@ -176,6 +178,25 @@ git agent-sync restore --commit 4f7c2a1
 ```
 
 commit 是主要查询锚点。`--current` 会先匹配当前 `HEAD` commit；如果没有结果，再回退匹配当前 branch。branch 只是同步发生时的历史标签，不代表会跟随可变分支指针。detached HEAD 同步时会记录 `branch: null`，仍然可以通过 commit 查询。
+
+## 跨平台恢复适配
+
+Codex session 文件里可能记录创建会话时的 shell 和工作目录。例如 Windows 上创建的 session 可能包含 `powershell.exe` 和 `C:\...` 路径。把这类 session 恢复到 macOS 或 Linux 后，如果这些环境字段不变，继续会话时就可能一直尝试使用错误的终端。
+
+默认情况下，`restore` 不会修改 sidecar store 中的原始文件，只会在检测到跨平台 Codex session 时适配恢复到本机的副本：
+
+- `session_meta.payload.cwd`、`turn_context.payload.cwd`、`event_msg.payload.cwd` 会映射为当前业务仓库根目录。
+- `exec_command` function call 里的 `workdir` 会映射为当前业务仓库根目录。
+- `exec_command` function call 里的 `shell` 会映射为当前机器 shell，例如 macOS / Linux 上的 `$SHELL`。
+- 不会翻译 `cmd` 命令正文。历史 PowerShell 命令仍然会作为历史 transcript 保留。
+- 恢复后的 Codex session 会在 `session_meta.payload` 写入 `agentSyncAdapted` 标记，方便后续审计。
+
+如果你需要完全按 sidecar 原文件恢复，不做任何本机适配：
+
+```bash
+git agent-sync restore --current --no-adapt
+git agent-sync restore --commit 4f7c2a1 --no-adapt
+```
 
 ## 本地目录结构
 

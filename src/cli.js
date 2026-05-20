@@ -69,6 +69,8 @@ function parseArgs(rawArgs) {
       options.all = true;
     } else if (arg === "--current") {
       options.current = true;
+    } else if (arg === "--no-adapt") {
+      options.noAdapt = true;
     } else if (arg.startsWith("--branch=")) {
       options.branch = arg.slice("--branch=".length);
     } else if (arg === "--branch") {
@@ -103,7 +105,7 @@ Usage:
   git agent-sync push
   git agent-sync pull
   git agent-sync scan [--json]
-  git agent-sync restore <bundle-id>|--all|--current|--branch <name>|--commit <sha>
+  git agent-sync restore <bundle-id>|--all|--current|--branch <name>|--commit <sha> [--no-adapt]
   git agent-sync install-hooks
   git agent-sync doctor
 
@@ -258,7 +260,7 @@ function restoreCommand(gitRoot, args, options) {
     if (!matches.length) {
       throw new Error(`no bindings found for ${formatSelector(selector)}`);
     }
-    restoreMatches(config, matches);
+    restoreMatches(config, matches, options);
     return;
   }
 
@@ -273,16 +275,19 @@ function restoreCommand(gitRoot, args, options) {
     throw new Error(`no bundle found for "${bundleId}"`);
   }
 
-  restoreMatches(config, matches);
+  restoreMatches(config, matches, options);
 }
 
-function restoreMatches(config, matches) {
+function restoreMatches(config, matches, options = {}) {
   for (const match of matches) {
     const source = join(config.storePath, match.storeRelativePath);
     const target = getRestoreTarget(match);
     mkdirSync(dirname(target), { recursive: true });
-    copyFileSync(source, target);
-    console.log(`restored ${match.agent}: ${target}`);
+    const result = restoreSessionFile(config, match, source, target, options);
+    const suffix = result.adapted
+      ? ` (adapted ${result.fromPlatform} -> ${result.toPlatform}, shell ${result.shell})`
+      : "";
+    console.log(`restored ${match.agent}: ${target}${suffix}`);
   }
 }
 
@@ -399,6 +404,272 @@ function getRestoreTarget(match) {
     return join(getAgentRoot(match.agent), match.agentRelativePath);
   }
   return expandHome(match.originalPath);
+}
+
+function restoreSessionFile(config, match, source, target, options) {
+  if (options.noAdapt || !shouldAdaptSessionFile(match, source)) {
+    copyFileSync(source, target);
+    return { adapted: false };
+  }
+
+  const content = readFileSync(source, "utf8");
+  const localPlatform = getLocalPlatform();
+  const localShell = getLocalShell();
+  const sourcePlatform = detectSessionPlatform(content);
+  if (!sourcePlatform || getPlatformFamily(sourcePlatform) === getPlatformFamily(localPlatform)) {
+    copyFileSync(source, target);
+    return { adapted: false };
+  }
+
+  const result = adaptCodexSessionContent(content, {
+    fromPlatform: sourcePlatform,
+    toPlatform: localPlatform,
+    shell: localShell,
+    projectRoot: config.projectRoot
+  });
+  writeFileSync(target, result.content);
+  return {
+    adapted: result.adapted,
+    fromPlatform: sourcePlatform,
+    toPlatform: localPlatform,
+    shell: localShell
+  };
+}
+
+function shouldAdaptSessionFile(match, source) {
+  return match.agent === "codex" && (source.endsWith(".jsonl") || source.endsWith(".json"));
+}
+
+function adaptCodexSessionContent(content, context) {
+  let adapted = false;
+  const lines = content.split(/\r?\n/);
+  const hasTrailingNewline = content.endsWith("\n") || content.endsWith("\r\n");
+  const adaptedLines = lines.map((line) => {
+    if (!line) {
+      return line;
+    }
+    let item;
+    try {
+      item = JSON.parse(line);
+    } catch {
+      return line;
+    }
+
+    const lineAdapted = adaptCodexSessionItem(item, context);
+    adapted = adapted || lineAdapted;
+    return lineAdapted ? JSON.stringify(item) : line;
+  });
+
+  if (!hasTrailingNewline && adaptedLines.at(-1) === "") {
+    adaptedLines.pop();
+  }
+
+  return { adapted, content: adaptedLines.join("\n") };
+}
+
+function adaptCodexSessionItem(item, context) {
+  let adapted = false;
+  const payload = item.payload;
+  if (!payload || typeof payload !== "object") {
+    return false;
+  }
+
+  if (item.type === "session_meta") {
+    if (replacePayloadCwd(payload, context.projectRoot, context.fromPlatform)) {
+      adapted = true;
+    }
+    payload.agentSyncAdapted = {
+      version: 1,
+      fromPlatform: context.fromPlatform,
+      toPlatform: context.toPlatform,
+      restoredAt: new Date().toISOString(),
+      strategy: "safe-restore-environment",
+      shell: context.shell,
+      projectRoot: context.projectRoot
+    };
+    adapted = true;
+  }
+
+  if (item.type === "turn_context" && replacePayloadCwd(payload, context.projectRoot, context.fromPlatform)) {
+    adapted = true;
+  }
+
+  if (item.type === "event_msg" && replacePayloadCwd(payload, context.projectRoot, context.fromPlatform)) {
+    adapted = true;
+  }
+
+  if (item.type === "response_item" && payload.type === "function_call" && payload.name === "exec_command") {
+    if (adaptExecCommandArguments(payload, context)) {
+      adapted = true;
+    }
+  }
+
+  return adapted;
+}
+
+function replacePayloadCwd(payload, projectRoot, sourcePlatform) {
+  if (!isSourcePlatformPath(payload.cwd, sourcePlatform)) {
+    return false;
+  }
+  payload.cwd = projectRoot;
+  return true;
+}
+
+function adaptExecCommandArguments(payload, context) {
+  if (typeof payload.arguments !== "string") {
+    return false;
+  }
+  let args;
+  try {
+    args = JSON.parse(payload.arguments);
+  } catch {
+    return false;
+  }
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return false;
+  }
+
+  let adapted = false;
+  if (isSourcePlatformPath(args.workdir, context.fromPlatform)) {
+    args.workdir = context.projectRoot;
+    adapted = true;
+  }
+  if (isSourcePlatformShell(args.shell, context.fromPlatform)) {
+    args.shell = context.shell;
+    adapted = true;
+  }
+
+  if (adapted) {
+    payload.arguments = JSON.stringify(args);
+  }
+  return adapted;
+}
+
+function detectSessionPlatform(content) {
+  const lines = content.split(/\r?\n/);
+  let sawWindows = false;
+  let sawDarwin = false;
+  let sawLinux = false;
+  let sawPosix = false;
+
+  for (const line of lines) {
+    if (!line) {
+      continue;
+    }
+    let item;
+    try {
+      item = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const signals = collectPlatformSignals(item);
+    sawWindows = sawWindows || signals.some((value) => isWindowsPath(value) || isWindowsShell(value));
+    sawDarwin = sawDarwin || signals.some(isDarwinPath);
+    sawLinux = sawLinux || signals.some(isLinuxPath);
+    sawPosix = sawPosix || signals.some((value) => isPosixPath(value) || isPosixShell(value));
+  }
+
+  if (sawWindows) {
+    return "win32";
+  }
+  if (sawDarwin && !sawLinux) {
+    return "darwin";
+  }
+  if (sawLinux && !sawDarwin) {
+    return "linux";
+  }
+  if (sawDarwin) {
+    return "darwin";
+  }
+  if (sawLinux) {
+    return "linux";
+  }
+  if (sawPosix) {
+    return "posix";
+  }
+  return null;
+}
+
+function collectPlatformSignals(item) {
+  const payload = item.payload;
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+
+  const signals = [payload.cwd, payload.workdir, payload.shell, payload.command].filter(Boolean);
+  if (item.type !== "response_item" || payload.type !== "function_call" || typeof payload.arguments !== "string") {
+    return signals;
+  }
+
+  try {
+    const args = JSON.parse(payload.arguments);
+    if (args && typeof args === "object" && !Array.isArray(args)) {
+      signals.push(args.cwd, args.workdir, args.shell);
+    }
+  } catch {
+    return signals;
+  }
+  return signals.filter(Boolean);
+}
+
+function isSourcePlatformPath(value, sourcePlatform) {
+  if (sourcePlatform === "win32") {
+    return isWindowsPath(value);
+  }
+  if (sourcePlatform === "posix") {
+    return isPosixPath(value);
+  }
+  return false;
+}
+
+function isSourcePlatformShell(value, sourcePlatform) {
+  if (sourcePlatform === "win32") {
+    return isWindowsShell(value);
+  }
+  if (sourcePlatform === "posix") {
+    return isPosixShell(value);
+  }
+  return false;
+}
+
+function isWindowsPath(value) {
+  return typeof value === "string" && /^[A-Za-z]:[\\/]/.test(value);
+}
+
+function isPosixPath(value) {
+  return isDarwinPath(value) || isLinuxPath(value);
+}
+
+function isDarwinPath(value) {
+  return typeof value === "string" && /^\/Users\//.test(value);
+}
+
+function isLinuxPath(value) {
+  return typeof value === "string" && (/^\/home\//.test(value) || /^\/workspace\//.test(value));
+}
+
+function isWindowsShell(value) {
+  return typeof value === "string" && /(^|[\\/])(powershell|pwsh|cmd)(\.exe)?$/i.test(value);
+}
+
+function isPosixShell(value) {
+  return typeof value === "string" && /(^|\/)(zsh|bash|sh|fish)$/.test(value);
+}
+
+function getLocalPlatform() {
+  return process.platform;
+}
+
+function getLocalShell() {
+  if (process.platform === "win32") {
+    return process.env.ComSpec || "cmd.exe";
+  }
+  return process.env.SHELL || "/bin/sh";
+}
+
+function getPlatformFamily(platform) {
+  return platform === "win32" ? "win32" : "posix";
 }
 
 function walk(root) {

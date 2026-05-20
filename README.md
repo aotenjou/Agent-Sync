@@ -12,6 +12,7 @@ It solves one specific problem: source code can move with `git clone`, but local
 - Copies matched sessions into a sidecar Git repo at `.agent-sync-store/`
 - Pushes and pulls that sidecar repo without adding sessions to your project commits
 - Restores pulled sessions back into the local Codex or Claude session directory
+- Adapts restored Codex sessions across operating systems without changing the sidecar source
 - Records lightweight Git context bindings for each pushed session
 - Lists or restores sessions by the current Git state, branch, or commit
 - Uses a cross-platform project identity based on the project Git remote when available
@@ -98,6 +99,7 @@ git agent-sync restore --all
 git agent-sync restore --current
 git agent-sync restore --branch <name>
 git agent-sync restore --commit <sha>
+git agent-sync restore --current --no-adapt
 git agent-sync install-hooks
 git agent-sync doctor
 ```
@@ -155,6 +157,25 @@ git agent-sync restore --commit 4f7c2a1
 ```
 
 Commit matching is the primary lookup path. `--current` first matches the current `HEAD` commit, then falls back to the current branch if no commit binding exists. Branches are historical labels from sync time; they do not follow mutable branch pointers. Detached HEAD syncs store `branch: null` and remain queryable by commit.
+
+## Cross-Platform Restore Adaptation
+
+Codex session files can contain the shell and working directory used on the source machine. For example, a session created on Windows may contain `powershell.exe` and `C:\...` paths. When restored on macOS or Linux, those stale environment fields can make the continued session try to use the wrong terminal.
+
+By default, `restore` keeps the sidecar source file unchanged and adapts only the restored local Codex copy when it detects a cross-platform session:
+
+- `session_meta.payload.cwd`, `turn_context.payload.cwd`, and `event_msg.payload.cwd` are mapped to the current project root.
+- `exec_command` function-call `workdir` is mapped to the current project root.
+- `exec_command` function-call `shell` is mapped to the current machine shell, such as `$SHELL` on macOS or Linux.
+- The command body `cmd` is not translated. A historical PowerShell command remains a PowerShell command in the transcript.
+- Restored Codex sessions get an `agentSyncAdapted` marker in `session_meta.payload` for auditability.
+
+To restore the exact sidecar file without any local adaptation:
+
+```bash
+git agent-sync restore --current --no-adapt
+git agent-sync restore --commit 4f7c2a1 --no-adapt
+```
 
 ## Local Files
 
