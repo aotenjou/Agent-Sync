@@ -8,7 +8,7 @@ It solves one specific problem: source code can move with `git clone`, but local
 
 - Scans Codex sessions in `~/.codex/sessions/**/*.jsonl`
 - Scans Claude Code sessions in `~/.claude/projects/**/*.jsonl`
-- Matches sessions to the current Git project by repo path, repo name, or repo remote
+- Matches Codex sessions through native JSONL metadata first; Claude sessions keep path, remote, and repo-name matching
 - Copies matched sessions into a sidecar Git repo at `.agent-sync-store/`
 - Pushes and pulls that sidecar repo without adding sessions to your project commits
 - Restores pulled sessions back into the local Codex or Claude session directory
@@ -104,7 +104,7 @@ git agent-sync install-hooks
 git agent-sync doctor
 ```
 
-`doctor` prints the project root, local config, sidecar store, session roots, remote, project identity, current project id, and legacy ids used for compatibility.
+`doctor` prints the project root, local config, sidecar store, resolved Codex / Claude session roots, remote, project identity, current project id, and legacy ids used for compatibility.
 
 ## Cross-Platform Project Identity
 
@@ -142,6 +142,8 @@ Each `push` writes a lightweight historical index at:
 
 `manifest.json` remains the latest snapshot. `bindings.jsonl` is used for historical lookup and records the session bundle, branch, `HEAD` commit, `baseCommit`, and whether the project worktree was dirty when the session was synced.
 
+For Codex sessions, new bindings prefer the Git context that Codex already saved inside the session JSONL. Agent-Sync reads `session_meta.payload.git.commit_hash`, `session_meta.payload.git.branch`, and `session_meta.payload.git.repository_url`, then falls back to the business repo's Git state at push time when those fields are missing or do not belong to the current project. `dirty` is still taken from the business repo at push time because Codex sessions do not provide a reliable per-session dirty flag.
+
 ```bash
 git agent-sync list --current
 git agent-sync list --branch main
@@ -160,14 +162,15 @@ Commit matching is the primary lookup path. `--current` first matches the curren
 
 ## Cross-Platform Restore Adaptation
 
-Codex session files can contain the shell and working directory used on the source machine. For example, a session created on Windows may contain `powershell.exe` and `C:\...` paths. When restored on macOS or Linux, those stale environment fields can make the continued session try to use the wrong terminal.
+Codex session files can contain the shell, working directory, and project-root paths used on the source machine. For example, a session created on Windows may contain `powershell.exe` and `C:\...\MokioAgent` paths. When restored on macOS or Linux, those stale references can make the continued session try to use a missing terminal or a project directory that does not exist.
 
 By default, `restore` keeps the sidecar source file unchanged and adapts only the restored local Codex copy when it detects a cross-platform session:
 
 - `session_meta.payload.cwd`, `turn_context.payload.cwd`, and `event_msg.payload.cwd` are mapped to the current project root.
 - `exec_command` function-call `workdir` is mapped to the current project root.
 - `exec_command` function-call `shell` is mapped to the current machine shell, such as `$SHELL` on macOS or Linux.
-- The command body `cmd` is not translated. A historical PowerShell command remains a PowerShell command in the transcript.
+- Source project-root path references inside transcript strings, command arguments, outputs, and sandbox metadata are mapped to the current project root.
+- Command syntax is not translated. A historical PowerShell command remains a PowerShell command in the transcript, but any embedded source project path is remapped.
 - Restored Codex sessions get an `agentSyncAdapted` marker in `session_meta.payload` for auditability.
 
 To restore the exact sidecar file without any local adaptation:
@@ -208,6 +211,32 @@ Both directories are added to the project `.gitignore`.
       claude/
         claude-<hash>.jsonl
 ```
+
+## Source Layout
+
+The CLI entrypoint is intentionally small. `src/cli.js` handles command dispatch, while the behavior lives in focused modules:
+
+```text
+src/
+  args.js            # CLI argument and selector validation
+  agents.js          # Codex / Claude discovery and scan matching
+  bindings.js        # Git context binding history
+  codex-session.js   # Codex JSONL metadata extraction and restore adaptation
+  config.js          # Local project config and identity
+  git.js             # Git root, remote, and worktree context
+  restore.js         # Restore flow and target paths
+  store.js           # Sidecar Git store and manifest
+  utils.js           # Shared JSON, hash, path, and walk helpers
+```
+
+Codex scanning and restore adaptation follow Codex's native JSONL shape. The extractor reads per-session facts from `session_meta.payload.cwd`, `session_meta.payload.git`, `turn_context.payload.cwd`, and `response_item.payload.arguments.workdir`. Restore path mapping uses those structured fields first, then scans transcript strings only as a fallback, while skipping opaque fields such as `encrypted_content`.
+
+Agent-Sync intentionally does not use these `.codex` files as core project/session truth:
+
+- `session_index.jsonl` only contains session id, title, and update time, so it is useful for future display but not for project ownership.
+- `config.toml` contains trusted project paths and user settings, but it is not a per-session record.
+- `.codex-global-state.json` is app/UI state and can include personal history unrelated to a project.
+- `shell_snapshots/` can be large and privacy-sensitive, so it is not part of default MVP sync.
 
 ## Non-Standard Session Paths
 

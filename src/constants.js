@@ -1,0 +1,9 @@
+export const TOOL_VERSION = "0.1.0";
+export const CONFIG_DIR = ".agent-sync";
+export const CONFIG_FILE = ".agent-sync/config.json";
+export const CACHE_FILE = ".agent-sync/last-scan.json";
+export const DEFAULT_AGENT_DIR = ".agent-sync-store";
+export const DEFAULT_STORE_GITIGNORE = "node_modules/\n.DS_Store\nThumbs.db\n";
+export const DEFAULT_STORE_BRANCH = "main";
+export const BINDINGS_FILE = "bindings.jsonl";
+export const SUPPORTED_AGENTS = ["codex", "claude"];
