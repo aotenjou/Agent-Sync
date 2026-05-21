@@ -45,6 +45,11 @@ export function getGitContext(gitRoot) {
   };
 }
 
+export function getGitValue(args, cwd) {
+  const result = runGit(args, cwd, { allowFail: true });
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
 function getCurrentBranch(gitRoot) {
   const result = runGit(["symbolic-ref", "--quiet", "--short", "HEAD"], gitRoot, { allowFail: true });
   return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : null;

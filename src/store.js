@@ -138,3 +138,11 @@ export function findProjectBundle(config) {
 
   return candidates[0]?.score > 0 ? candidates[0] : null;
 }
+
+export function getProjectBundleDir(config) {
+  return join(config.storePath, "projects", config.projectId);
+}
+
+export function getManifestPath(config) {
+  return join(getProjectBundleDir(config), "manifest.json");
+}

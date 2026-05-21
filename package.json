@@ -5,6 +5,7 @@
   "type": "module",
   "files": [
     "bin/",
+    "docs/",
     "src/",
     "README.md",
     "README.zh-CN.md",
@@ -15,7 +16,12 @@
     "agent-sync": "./bin/git-agent-sync.js"
   },
   "scripts": {
-    "smoke": "node ./bin/git-agent-sync.js --help"
+    "check": "node ./scripts/check.js",
+    "smoke": "node ./bin/git-agent-sync.js --help",
+    "test": "npm run check && npm run smoke && npm run test:bindings && npm run test:codex-session && npm run test:e2e",
+    "test:bindings": "node ./scripts/test-bindings.js",
+    "test:codex-session": "node ./scripts/test-codex-session.js",
+    "test:e2e": "node ./scripts/test-e2e.js"
   },
   "keywords": [
     "git",

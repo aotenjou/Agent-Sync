@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import {
   CACHE_FILE,
@@ -11,7 +11,7 @@ import {
 } from "./constants.js";
 import { parseArgs, parseSelector, formatSelector } from "./args.js";
 import { getAgentRoot, scanSessions } from "./agents.js";
-import { queryBindings, writeBindings } from "./bindings.js";
+import { getBindingsPath, inspectBindings, queryBindings, writeBindings } from "./bindings.js";
 import {
   legacyProjectIdForPath,
   readConfig,
@@ -19,13 +19,14 @@ import {
   writeConfig,
   writeGitignoreEntry
 } from "./config.js";
-import { getGitContext, getGitRoot, getProjectIdentity, runGit } from "./git.js";
+import { getGitContext, getGitRoot, getGitValue, getProjectIdentity, runGit } from "./git.js";
 import { restoreCommand } from "./restore.js";
 import {
   adoptExistingProjectBundle,
   copyMatchesToStore,
   ensureStoreRepo,
   findProjectBundle,
+  getManifestPath,
   syncStoreFromRemote,
   writeManifest
 } from "./store.js";
@@ -231,23 +232,129 @@ function doctorCommand(gitRoot) {
   const config = existsSync(join(gitRoot, CONFIG_FILE)) ? readConfigWithBundle(gitRoot) : null;
   const codexRoot = getAgentRoot("codex");
   const claudeRoot = getAgentRoot("claude");
-  const checks = [
-    ["git root", gitRoot],
-    ["node", process.version],
-    ["codex dir", existsSync(codexRoot) ? codexRoot : "missing"],
-    ["claude dir", existsSync(claudeRoot) ? claudeRoot : "missing"],
-    ["config", config ? join(gitRoot, CONFIG_FILE) : "missing"]
-  ];
+  const checks = [];
+  addCheck(checks, "git root", "ok", gitRoot);
+  addCheck(checks, "node", "ok", process.version);
+  addCheck(checks, "codex dir", existsSync(codexRoot) ? "ok" : "warn", existsSync(codexRoot) ? codexRoot : "missing");
+  addCheck(checks, "claude dir", existsSync(claudeRoot) ? "ok" : "warn", existsSync(claudeRoot) ? claudeRoot : "missing");
+  addCheck(checks, "config", config ? "ok" : "fail", config ? join(gitRoot, CONFIG_FILE) : "missing");
   if (config) {
-    checks.push(["store", existsSync(config.storePath) ? config.storePath : "missing"]);
-    checks.push(["remote", config.remote || "none"]);
-    checks.push(["identity", config.projectIdentity]);
-    checks.push(["project id", config.projectId]);
-    checks.push(["legacy id", config.legacyProjectIds?.join(", ") || "none"]);
+    addCheck(checks, "store", existsSync(config.storePath) ? "ok" : "fail", existsSync(config.storePath) ? config.storePath : "missing");
+    addCheck(checks, "remote", checkRemote(config), config.remote || "none");
+    addCheck(checks, "store git", checkStoreGit(config), describeStoreGit(config));
+    addCheck(checks, "manifest", checkManifest(config), describeManifest(config));
+    addCheck(checks, "bindings", checkBindings(config), describeBindings(config));
+    addCheck(checks, "codex files", "ok", `${countAgentFiles(codexRoot)} file(s)`);
+    addCheck(checks, "claude files", "ok", `${countAgentFiles(claudeRoot)} file(s)`);
+    addCheck(checks, "identity", "ok", config.projectIdentity);
+    addCheck(checks, "project id", "ok", config.projectId);
+    addCheck(checks, "legacy id", "ok", config.legacyProjectIds?.join(", ") || "none");
   }
-  for (const [label, value] of checks) {
-    console.log(`${label.padEnd(10)} ${value}`);
+  for (const check of checks) {
+    console.log(`${check.status.padEnd(5)} ${check.label.padEnd(12)} ${check.value}`);
   }
+}
+
+function addCheck(checks, label, status, value) {
+  checks.push({ label, status, value });
+}
+
+function checkRemote(config) {
+  if (!config.remote) {
+    return "warn";
+  }
+  if (!existsSync(join(config.storePath, ".git"))) {
+    return "fail";
+  }
+  const result = runGit(["ls-remote", "--heads", "origin"], config.storePath, { allowFail: true });
+  return result.status === 0 ? "ok" : "fail";
+}
+
+function checkStoreGit(config) {
+  if (!existsSync(join(config.storePath, ".git"))) {
+    return "fail";
+  }
+  const branch = getGitValue(["rev-parse", "--abbrev-ref", "HEAD"], config.storePath);
+  return branch === DEFAULT_STORE_BRANCH ? "ok" : "warn";
+}
+
+function describeStoreGit(config) {
+  if (!existsSync(join(config.storePath, ".git"))) {
+    return "missing .git";
+  }
+  const branch = getGitValue(["rev-parse", "--abbrev-ref", "HEAD"], config.storePath) || "unknown";
+  const upstream = getGitValue(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], config.storePath) || "no upstream";
+  return `${branch}, ${upstream}`;
+}
+
+function checkManifest(config) {
+  const path = getManifestPath(config);
+  if (!existsSync(path)) {
+    return "warn";
+  }
+  try {
+    const manifest = readJson(path);
+    return Array.isArray(manifest.matches) ? "ok" : "fail";
+  } catch {
+    return "fail";
+  }
+}
+
+function describeManifest(config) {
+  const path = getManifestPath(config);
+  if (!existsSync(path)) {
+    return "missing";
+  }
+  try {
+    const manifest = readJson(path);
+    const count = Array.isArray(manifest.matches) ? manifest.matches.length : 0;
+    return `${count} match(es)`;
+  } catch (error) {
+    return `invalid JSON (${error.message})`;
+  }
+}
+
+function checkBindings(config) {
+  const summary = inspectBindings(config);
+  if (!summary.exists) {
+    return "warn";
+  }
+  return summary.invalid ? "warn" : "ok";
+}
+
+function describeBindings(config) {
+  const summary = inspectBindings(config);
+  if (!summary.exists) {
+    return `missing (${getBindingsPath(config)})`;
+  }
+  const base = `${summary.valid} valid, ${summary.invalid} invalid`;
+  return summary.errors.length ? `${base}; ${summary.errors.slice(0, 2).join("; ")}` : base;
+}
+
+function countAgentFiles(root) {
+  if (!existsSync(root)) {
+    return 0;
+  }
+  const stack = [root];
+  let count = 0;
+  while (stack.length) {
+    const current = stack.pop();
+    let entries = [];
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const path = join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(path);
+      } else if (entry.isFile() && (entry.name.endsWith(".jsonl") || entry.name.endsWith(".json"))) {
+        count += 1;
+      }
+    }
+  }
+  return count;
 }
 
 function readConfigWithBundle(gitRoot) {

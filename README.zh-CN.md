@@ -25,6 +25,8 @@
 - 兼容旧版本按本地绝对路径生成的历史 bundle
 - 不会把 `.codex` / `.claude` 文件加入业务项目的 Git 提交
 
+完整内部执行链路见：[工具执行链路](docs/execution-flow.zh-CN.md)。
+
 ## 安装
 
 本地开发阶段：
@@ -125,7 +127,7 @@ git agent-sync install-hooks
 git agent-sync doctor
 ```
 
-`doctor` 会输出 Git 项目根目录、本地配置、sidecar store、实际解析后的 Codex / Claude 会话目录、远程仓库、项目 identity、当前 `projectId` 和兼容旧数据使用的 legacy id。
+`doctor` 会以 `ok` / `warn` / `fail` 形式检查 Git 项目根目录、本地配置、sidecar store、远程仓库可达性、sidecar 分支/upstream、`manifest.json`、`bindings.jsonl`、实际解析后的 Codex / Claude 会话目录、项目 identity、当前 `projectId` 和兼容旧数据使用的 legacy id。
 
 ## 跨平台项目身份
 
@@ -275,7 +277,31 @@ $env:AGENT_SYNC_CODEX_DIR="D:\codex-sessions"
 git agent-sync status
 ```
 
+## 开发验证
+
+运行完整 MVP 测试：
+
+```bash
+npm run test
+```
+
+测试内容包括：
+
+- `npm run check`：JavaScript 语法检查和 `git diff --check`
+- `npm run smoke`：CLI 入口帮助输出
+- `npm run test:bindings`：`bindings.jsonl` 兼容旧字段和坏行容错
+- `npm run test:codex-session`：Windows / macOS / Linux 风格 Codex 路径适配
+- `npm run test:e2e`：用两个临时业务 clone 和一个 bare sidecar remote 覆盖 `push`、`pull`、`list --current`、`list --branch`、`list --commit`、`restore`、`doctor`，并验证 `.agent-sync-store` 不会被业务仓库跟踪
+
 ## 排查问题
+
+优先运行：
+
+```bash
+git agent-sync doctor
+```
+
+`doctor` 会报告 sidecar remote 是否可达、sidecar store 是否在预期分支、`manifest.json` 和 `bindings.jsonl` 是否可读，以及当前能看到多少本地 agent session 文件。
 
 如果 `pull` 提示没有 remote，重新初始化并传入远程仓库：
 
@@ -335,10 +361,10 @@ npm login
 npm pack --dry-run
 ```
 
-运行 smoke test：
+运行完整测试：
 
 ```bash
-npm run smoke
+npm run test
 ```
 
 发布公开包：

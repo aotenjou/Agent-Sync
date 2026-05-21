@@ -104,7 +104,7 @@ git agent-sync install-hooks
 git agent-sync doctor
 ```
 
-`doctor` prints the project root, local config, sidecar store, resolved Codex / Claude session roots, remote, project identity, current project id, and legacy ids used for compatibility.
+`doctor` prints `ok` / `warn` / `fail` checks for the project root, config, sidecar store, remote reachability, sidecar branch/upstream, manifest, bindings, resolved Codex / Claude session roots, project identity, current project id, and legacy ids used for compatibility.
 
 ## Cross-Platform Project Identity
 
@@ -254,7 +254,31 @@ $env:AGENT_SYNC_CODEX_DIR="D:\codex-sessions"
 git agent-sync status
 ```
 
+## Development Checks
+
+Run the full MVP test suite:
+
+```bash
+npm run test
+```
+
+The suite includes:
+
+- `npm run check`: JavaScript syntax checks and `git diff --check`.
+- `npm run smoke`: CLI entrypoint help output.
+- `npm run test:bindings`: `bindings.jsonl` compatibility and invalid-line handling.
+- `npm run test:codex-session`: Windows / macOS / Linux style Codex path adaptation.
+- `npm run test:e2e`: two temporary project clones plus a bare sidecar remote, covering `push`, `pull`, `list --current`, `list --branch`, `list --commit`, `restore`, `doctor`, and verification that `.agent-sync-store` is not tracked by the business repo.
+
 ## Troubleshooting
+
+Start with:
+
+```bash
+git agent-sync doctor
+```
+
+`doctor` reports whether the sidecar remote is reachable, whether the sidecar store is on the expected branch, whether `manifest.json` and `bindings.jsonl` are readable, and how many local agent session files are visible.
 
 If `pull` says there is no remote, initialize again with a remote:
 

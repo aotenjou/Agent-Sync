@@ -50,15 +50,53 @@ export function writeBindings(config, matches, gitContext) {
   return additions.length;
 }
 
-function readBindings(config) {
+export function inspectBindings(config) {
   const bindingsPath = getBindingsPath(config);
-  if (!existsSync(bindingsPath)) {
-    return [];
+  const result = {
+    path: bindingsPath,
+    exists: existsSync(bindingsPath),
+    totalLines: 0,
+    valid: 0,
+    invalid: 0,
+    bindings: [],
+    errors: []
+  };
+
+  if (!result.exists) {
+    return result;
   }
-  return readFileSync(bindingsPath, "utf8")
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
+
+  const lines = readFileSync(bindingsPath, "utf8").split(/\r?\n/);
+  lines.forEach((line, index) => {
+    if (!line.trim()) {
+      return;
+    }
+    result.totalLines += 1;
+    let binding;
+    try {
+      binding = JSON.parse(line);
+    } catch (error) {
+      result.invalid += 1;
+      result.errors.push(`line ${index + 1}: invalid JSON (${error.message})`);
+      return;
+    }
+
+    const normalized = normalizeBinding(binding);
+    if (!normalized) {
+      result.invalid += 1;
+      result.errors.push(`line ${index + 1}: missing required binding fields`);
+      return;
+    }
+
+    result.valid += 1;
+    result.bindings.push(normalized);
+  });
+
+  return result;
+}
+
+function readBindings(config) {
+  return inspectBindings(config).bindings;
 }
 
 export function queryBindings(config, selector, gitRoot) {
@@ -112,7 +150,7 @@ function bindingKey(binding) {
   return `${binding.bundleId}:${binding.headCommit}:${binding.branch || ""}`;
 }
 
-function getBindingsPath(config) {
+export function getBindingsPath(config) {
   return join(config.storePath, "projects", config.projectId, BINDINGS_FILE);
 }
 
@@ -121,4 +159,35 @@ function getMatchBindingContext(match, fallbackGitContext, config) {
     return getCodexBindingContext(match.metadata, fallbackGitContext, config, match);
   }
   return fallbackGitContext;
+}
+
+function normalizeBinding(binding) {
+  if (!binding || typeof binding !== "object") {
+    return null;
+  }
+  const headCommit = binding.headCommit || binding.commit || binding.baseCommit || null;
+  const baseCommit = binding.baseCommit || headCommit;
+  const normalized = {
+    version: binding.version || 1,
+    boundAt: binding.boundAt || null,
+    projectId: binding.projectId || null,
+    projectIdentity: binding.projectIdentity || null,
+    bundleId: binding.bundleId || null,
+    agent: binding.agent || null,
+    sha256: binding.sha256 || null,
+    storeRelativePath: binding.storeRelativePath || null,
+    originalPath: binding.originalPath || null,
+    agentRelativePath: binding.agentRelativePath || null,
+    branch: binding.branch ?? null,
+    headCommit,
+    baseCommit,
+    dirty: Boolean(binding.dirty)
+  };
+  if (!normalized.bundleId || !normalized.agent || !normalized.storeRelativePath) {
+    return null;
+  }
+  if (!normalized.headCommit && !normalized.baseCommit && !normalized.branch) {
+    return null;
+  }
+  return normalized;
 }
