@@ -27,10 +27,13 @@ import {
   ensureStoreRepo,
   findProjectBundle,
   getManifestPath,
+  pruneArchivedManifestEntries,
+  pruneArchivedSidecarEntries,
   syncStoreFromRemote,
   writeManifest
 } from "./store.js";
 import { normalizePath, readJson, unique, writeJson } from "./utils.js";
+import { getCodexArchiveInfo, isArchivedCodexSessionPath, summarizeCodexArchiveInfo } from "./codex-archive.js";
 
 export async function main(argv) {
   const { command, args, options } = parseArgs(argv.slice(2));
@@ -161,20 +164,22 @@ function pushCommand(gitRoot) {
   adoptExistingProjectBundle(config);
   writeConfig(gitRoot, config);
   const gitContext = getGitContext(gitRoot);
-  const scan = scanSessions(gitRoot, config);
+  const archiveInfo = getCodexArchiveInfo(getAgentRoot("codex"));
+  const scan = scanSessions(gitRoot, config, archiveInfo);
   writeJson(join(gitRoot, CACHE_FILE), scan);
 
-  const copied = copyMatchesToStore(config, scan);
+  const pruned = pruneArchivedSidecarEntries(config, archiveInfo);
+  const copied = copyMatchesToStore(config, scan, archiveInfo);
   writeManifest(config, scan, gitContext);
   const bindingsAdded = writeBindings(config, scan.matches, gitContext);
 
   runGit(["add", "."], config.storePath);
   const diff = runGit(["diff", "--cached", "--quiet"], config.storePath, { allowFail: true });
   if (diff.status === 0) {
-    console.log(`agent-sync: no sidecar changes (${copied.length} matched sessions).`);
+    console.log(`agent-sync: no sidecar changes (${copied.length} matched sessions, ${pruned.removedFiles} archived removed).`);
   } else {
     runGit(["commit", "-m", `sync ${config.projectName} agent sessions`], config.storePath);
-    console.log(`agent-sync: committed ${copied.length} matched session file(s), ${bindingsAdded} new binding(s).`);
+    console.log(`agent-sync: committed ${copied.length} matched session file(s), ${bindingsAdded} new binding(s), ${pruned.removedFiles} archived removed.`);
   }
 
   if (config.remote) {
@@ -186,6 +191,7 @@ function pushCommand(gitRoot) {
 function pullCommand(gitRoot) {
   const config = readConfigWithBundle(gitRoot);
   ensureStoreRepo(config.storePath, config.remote);
+  const archiveInfo = getCodexArchiveInfo(getAgentRoot("codex"));
 
   if (config.remote) {
     const pulled = syncStoreFromRemote(config.storePath, config.remote);
@@ -197,6 +203,15 @@ function pullCommand(gitRoot) {
     writeConfig(gitRoot, config);
   } else {
     console.log("agent-sync: no remote configured; local sidecar store is already available.");
+  }
+
+  const pruned = pruneArchivedSidecarEntries(config, archiveInfo);
+  const manifestPruned = pruneArchivedManifestEntries(config, archiveInfo);
+  if (pruned.removedFiles || pruned.removedBindings) {
+    console.log(`agent-sync: pruned ${pruned.removedFiles} archived file(s) and ${pruned.removedBindings} archived binding(s).`);
+  }
+  if (manifestPruned.removed) {
+    console.log(`agent-sync: pruned ${manifestPruned.removed} archived manifest entr${manifestPruned.removed === 1 ? "y" : "ies"}.`);
   }
 
   const bundle = findProjectBundle(config);
@@ -232,10 +247,12 @@ function doctorCommand(gitRoot) {
   const config = existsSync(join(gitRoot, CONFIG_FILE)) ? readConfigWithBundle(gitRoot) : null;
   const codexRoot = getAgentRoot("codex");
   const claudeRoot = getAgentRoot("claude");
+  const codexArchive = getCodexArchiveInfo(codexRoot);
   const checks = [];
   addCheck(checks, "git root", "ok", gitRoot);
   addCheck(checks, "node", "ok", process.version);
   addCheck(checks, "codex dir", existsSync(codexRoot) ? "ok" : "warn", existsSync(codexRoot) ? codexRoot : "missing");
+  addCheck(checks, "codex archive", codexArchive.stateStatus === "ok" ? "ok" : "warn", describeCodexArchive(codexArchive));
   addCheck(checks, "claude dir", existsSync(claudeRoot) ? "ok" : "warn", existsSync(claudeRoot) ? claudeRoot : "missing");
   addCheck(checks, "config", config ? "ok" : "fail", config ? join(gitRoot, CONFIG_FILE) : "missing");
   if (config) {
@@ -244,7 +261,7 @@ function doctorCommand(gitRoot) {
     addCheck(checks, "store git", checkStoreGit(config), describeStoreGit(config));
     addCheck(checks, "manifest", checkManifest(config), describeManifest(config));
     addCheck(checks, "bindings", checkBindings(config), describeBindings(config));
-    addCheck(checks, "codex files", "ok", `${countAgentFiles(codexRoot)} file(s)`);
+    addCheck(checks, "codex files", "ok", `${countAgentFiles(codexRoot, codexArchive)} file(s) visible, ${codexArchive.archivedPaths.size} archived skipped`);
     addCheck(checks, "claude files", "ok", `${countAgentFiles(claudeRoot)} file(s)`);
     addCheck(checks, "identity", "ok", config.projectIdentity);
     addCheck(checks, "project id", "ok", config.projectId);
@@ -331,7 +348,12 @@ function describeBindings(config) {
   return summary.errors.length ? `${base}; ${summary.errors.slice(0, 2).join("; ")}` : base;
 }
 
-function countAgentFiles(root) {
+function describeCodexArchive(info) {
+  const summary = summarizeCodexArchiveInfo(info);
+  return `${summary.archivedCount} archived session(s), state ${summary.stateStatus}, ${summary.sourceSummary}`;
+}
+
+function countAgentFiles(root, archiveInfo = null) {
   if (!existsSync(root)) {
     return 0;
   }
@@ -350,6 +372,9 @@ function countAgentFiles(root) {
       if (entry.isDirectory()) {
         stack.push(path);
       } else if (entry.isFile() && (entry.name.endsWith(".jsonl") || entry.name.endsWith(".json"))) {
+        if (archiveInfo && isArchivedCodexSessionPath(path, archiveInfo)) {
+          continue;
+        }
         count += 1;
       }
     }

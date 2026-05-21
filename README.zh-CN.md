@@ -12,6 +12,7 @@
 
 - 作为 Git 子命令使用：`git agent-sync ...`
 - 扫描 Codex 会话：`~/.codex/sessions/**/*.jsonl`
+- 默认跳过 Codex 已归档会话：`~/.codex/archived_sessions/**/*.jsonl`，以及 `state_5.sqlite` 里 `threads.archived = 1` 的线程
 - 扫描 Claude Code 会话：`~/.claude/projects/**/*.jsonl`
 - Codex 会话优先根据 JSONL 原生元数据匹配项目；Claude 会话继续按路径、remote、仓库名匹配
 - 把匹配到的会话复制到 sidecar Git 仓库 `.agent-sync-store/`
@@ -128,6 +129,7 @@ git agent-sync doctor
 ```
 
 `doctor` 会以 `ok` / `warn` / `fail` 形式检查 Git 项目根目录、本地配置、sidecar store、远程仓库可达性、sidecar 分支/upstream、`manifest.json`、`bindings.jsonl`、实际解析后的 Codex / Claude 会话目录、项目 identity、当前 `projectId` 和兼容旧数据使用的 legacy id。
+它也会显示 Codex 归档线程的统计，帮助确认归档会话没有被算进本次同步。
 
 ## 跨平台项目身份
 

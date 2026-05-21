@@ -7,6 +7,7 @@ It solves one specific problem: source code can move with `git clone`, but local
 ## What It Does
 
 - Scans Codex sessions in `~/.codex/sessions/**/*.jsonl`
+- Skips archived Codex sessions by default: `~/.codex/archived_sessions/**/*.jsonl` and threads marked `archived = 1` in `state_5.sqlite`
 - Scans Claude Code sessions in `~/.claude/projects/**/*.jsonl`
 - Matches Codex sessions through native JSONL metadata first; Claude sessions keep path, remote, and repo-name matching
 - Copies matched sessions into a sidecar Git repo at `.agent-sync-store/`
@@ -105,6 +106,7 @@ git agent-sync doctor
 ```
 
 `doctor` prints `ok` / `warn` / `fail` checks for the project root, config, sidecar store, remote reachability, sidecar branch/upstream, manifest, bindings, resolved Codex / Claude session roots, project identity, current project id, and legacy ids used for compatibility.
+It also shows archived Codex thread counts so you can confirm archived sessions are not being treated as active sync candidates.
 
 ## Cross-Platform Project Identity
 

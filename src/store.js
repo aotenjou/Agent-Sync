@@ -2,8 +2,9 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFile
 import { dirname, join } from "node:path";
 import { DEFAULT_STORE_BRANCH, DEFAULT_STORE_GITIGNORE, TOOL_VERSION } from "./constants.js";
 import { getProjectRemote, runGit } from "./git.js";
+import { isArchivedCodexSessionPath } from "./codex-archive.js";
 import { scoreProjectManifest } from "./config.js";
-import { expandHome, readJson, toSlash, unique, writeJson } from "./utils.js";
+import { expandHome, normalizePath, readJson, toSlash, unique, writeJson } from "./utils.js";
 
 export function ensureStoreRepo(storePath, remote) {
   mkdirSync(storePath, { recursive: true });
@@ -64,11 +65,93 @@ function removeBootstrapGitignore(storePath) {
   }
 }
 
-export function copyMatchesToStore(config, scan) {
+export function pruneArchivedSidecarEntries(config, archiveInfo) {
+  if (!archiveInfo) {
+    return { removedFiles: 0, removedBindings: 0 };
+  }
+
+  const bundleDir = getProjectBundleDir(config);
+  if (!existsSync(bundleDir)) {
+    return { removedFiles: 0, removedBindings: 0 };
+  }
+
+  const manifestPath = getManifestPath(config);
+  const archivedStorePaths = new Set();
+  const archivedOriginalPaths = new Set();
+
+  if (existsSync(manifestPath)) {
+    try {
+      const manifest = readJson(manifestPath);
+      for (const match of manifest.matches || []) {
+        if (match.agent === "codex" && isArchivedCodexSessionPath(match.originalPath, archiveInfo)) {
+          if (match.storeRelativePath) {
+            archivedStorePaths.add(join(config.storePath, match.storeRelativePath));
+          }
+          if (match.originalPath) {
+            archivedOriginalPaths.add(normalizePath(expandHome(match.originalPath)));
+          }
+        }
+      }
+    } catch {
+      // keep going; bindings cleanup still works below
+    }
+  }
+
+  const bindingsPath = join(bundleDir, "bindings.jsonl");
+  let removedBindings = 0;
+  if (existsSync(bindingsPath)) {
+    const raw = readFileSync(bindingsPath, "utf8");
+    const keptLines = [];
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line.trim()) {
+        continue;
+      }
+      let binding;
+      try {
+        binding = JSON.parse(line);
+      } catch {
+        keptLines.push(line);
+        continue;
+      }
+      const originalPath = binding?.originalPath ? normalizePath(expandHome(binding.originalPath)) : "";
+      const shouldRemove = binding?.agent === "codex" && isArchivedCodexSessionPath(binding.originalPath, archiveInfo);
+      if (shouldRemove) {
+        removedBindings += 1;
+        if (binding.storeRelativePath) {
+          archivedStorePaths.add(join(config.storePath, binding.storeRelativePath));
+        }
+        if (originalPath) {
+          archivedOriginalPaths.add(originalPath);
+        }
+        continue;
+      }
+      keptLines.push(line);
+    }
+    if (removedBindings) {
+      const content = keptLines.length ? `${keptLines.join("\n")}\n` : "";
+      writeFileSync(bindingsPath, content);
+    }
+  }
+
+  let removedFiles = 0;
+  for (const filePath of archivedStorePaths) {
+    if (existsSync(filePath)) {
+      unlinkSync(filePath);
+      removedFiles += 1;
+    }
+  }
+
+  return { removedFiles, removedBindings, archivedOriginalPaths: archivedOriginalPaths.size };
+}
+
+export function copyMatchesToStore(config, scan, archiveInfo = null) {
   const copied = [];
   const projectDir = join(config.storePath, "projects", config.projectId);
   for (const match of scan.matches) {
     const source = expandHome(match.originalPath);
+    if (archiveInfo && match.agent === "codex" && isArchivedCodexSessionPath(source, archiveInfo)) {
+      continue;
+    }
     const storeRelativePath = join(
       "projects",
       config.projectId,
@@ -97,6 +180,42 @@ export function writeManifest(config, scan, gitContext = null) {
     matches: scan.matches.map(({ absolutePath, ...item }) => item)
   };
   writeJson(join(config.storePath, "projects", config.projectId, "manifest.json"), manifest);
+}
+
+export function pruneArchivedManifestEntries(config, archiveInfo) {
+  const manifestPath = getManifestPath(config);
+  if (!archiveInfo || !existsSync(manifestPath)) {
+    return { removed: 0 };
+  }
+
+  let manifest;
+  try {
+    manifest = readJson(manifestPath);
+  } catch {
+    return { removed: 0 };
+  }
+
+  if (!Array.isArray(manifest.matches) || !manifest.matches.length) {
+    return { removed: 0 };
+  }
+
+  const keptMatches = [];
+  let removed = 0;
+  for (const match of manifest.matches) {
+    if (match.agent === "codex" && isArchivedCodexSessionPath(match.originalPath, archiveInfo)) {
+      removed += 1;
+      continue;
+    }
+    keptMatches.push(match);
+  }
+
+  if (!removed) {
+    return { removed: 0 };
+  }
+
+  manifest.matches = keptMatches;
+  writeJson(manifestPath, manifest);
+  return { removed };
 }
 
 export function adoptExistingProjectBundle(config) {

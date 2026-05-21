@@ -1,12 +1,14 @@
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, relative } from "node:path";
+import { getCodexArchiveInfo, isArchivedCodexSessionPath, summarizeCodexArchiveInfo } from "./codex-archive.js";
 import { getProjectRemote, normalizeRemoteUrl } from "./git.js";
 import { extractCodexSessionMetadata, normalizeSessionPathReference } from "./codex-session.js";
 import { normalizePath, safeRead, sha256, shrinkHome, toSlash, unique, walk } from "./utils.js";
 
-export function scanSessions(gitRoot, config) {
+export function scanSessions(gitRoot, config, archiveInfo = null) {
   const projectRemote = normalizeRemoteUrl(getProjectRemote(gitRoot) || "");
+  const codexArchiveInfo = archiveInfo || getCodexArchiveInfo(getAgentRoot("codex"));
   const needles = unique([
     normalizePath(gitRoot),
     normalizePath(gitRoot).replaceAll("/", "\\"),
@@ -16,7 +18,7 @@ export function scanSessions(gitRoot, config) {
   ].filter(Boolean));
 
   const candidates = [
-    ...findAgentFiles("codex", getAgentRoot("codex")),
+    ...findAgentFiles("codex", getAgentRoot("codex")).filter((candidate) => !isArchivedCodexSessionPath(candidate.path, codexArchiveInfo)),
     ...findAgentFiles("claude", getAgentRoot("claude"))
   ];
 
@@ -55,7 +57,8 @@ export function scanSessions(gitRoot, config) {
     projectName: config.projectName,
     projectRoot: gitRoot,
     candidates: candidates.length,
-    matches
+    matches,
+    archive: summarizeCodexArchiveInfo(codexArchiveInfo)
   };
 }
 

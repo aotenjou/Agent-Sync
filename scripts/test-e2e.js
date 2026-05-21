@@ -20,6 +20,7 @@ const codexBranch = join(base, "codex-branch");
 const codexCommit = join(base, "codex-commit");
 const claudeA = join(base, "claude-a");
 const claudeB = join(base, "claude-b");
+const windowsRoot = `C:\\Users\\woodq\\FullStack\\${projectName}`;
 
 mkdirSync(machineA, { recursive: true });
 mkdirSync(machineBParent, { recursive: true });
@@ -30,6 +31,8 @@ mkdirSync(codexBranch, { recursive: true });
 mkdirSync(codexCommit, { recursive: true });
 mkdirSync(claudeA, { recursive: true });
 mkdirSync(claudeB, { recursive: true });
+mkdirSync(join(codexA, "archived_sessions"), { recursive: true });
+mkdirSync(join(codexA, "2026", "05", "21"), { recursive: true });
 
 run("git", ["init", "--bare", "-b", "main", bareProjectRemote], base);
 run("git", ["init", "--bare", "-b", "main", bareStoreRemote], base);
@@ -48,8 +51,8 @@ run("git", ["commit", "-m", "ignore agent sync files"], projectA);
 run("git", ["push"], projectA);
 const currentCommit = run("git", ["rev-parse", "HEAD"], projectA);
 
-const windowsRoot = `C:\\Users\\woodq\\FullStack\\${projectName}`;
 const sessionPath = join(codexA, "2026", "05", "21", "session.jsonl");
+const archivedPath = join(codexA, "archived_sessions", "archived-session.jsonl");
 writeJsonl(sessionPath, [
   {
     type: "session_meta",
@@ -77,9 +80,25 @@ writeJsonl(sessionPath, [
     }
   }
 ]);
+writeJsonl(archivedPath, [
+  {
+    type: "session_meta",
+    payload: {
+      id: "archived-session",
+      cwd: windowsRoot,
+      git: {
+        commit_hash: currentCommit,
+        branch: "main",
+        repository_url: bareProjectRemote
+      }
+    }
+  },
+  { type: "turn_context", payload: { cwd: windowsRoot } }
+]);
 
 const pushOut = agent(projectA, codexA, claudeA, ["push"]);
 assert.match(pushOut, /1 matched session file\(s\), 1 new binding\(s\)/);
+assert.match(pushOut, /archived removed/);
 assert.equal(run("git", ["status", "--porcelain", "--", ".agent-sync-store"], projectA), "");
 assert.equal(run("git", ["status", "--porcelain"], projectA), "");
 assert.equal(run("git", ["ls-files", ".agent-sync-store"], projectA), "");
@@ -112,6 +131,7 @@ assert.ok(restored[0].payload.agentSyncAdapted);
 const doctor = agent(projectB, codexB, claudeB, ["doctor"]);
 assert.match(doctor, /ok\s+manifest\s+1 match\(es\)/);
 assert.match(doctor, /ok\s+bindings\s+1 valid, 0 invalid/);
+assert.match(doctor, /archived skipped/);
 
 console.log(JSON.stringify({ base, currentCommit }, null, 2));
 
