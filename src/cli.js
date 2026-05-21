@@ -164,7 +164,7 @@ function pushCommand(gitRoot) {
   adoptExistingProjectBundle(config);
   writeConfig(gitRoot, config);
   const gitContext = getGitContext(gitRoot);
-  const archiveInfo = getCodexArchiveInfo(getAgentRoot("codex"));
+  const archiveInfo = getCodexArchiveInfo(getAgentRoot("codex"), { gitRoot });
   const scan = scanSessions(gitRoot, config, archiveInfo);
   writeJson(join(gitRoot, CACHE_FILE), scan);
 
@@ -191,7 +191,7 @@ function pushCommand(gitRoot) {
 function pullCommand(gitRoot) {
   const config = readConfigWithBundle(gitRoot);
   ensureStoreRepo(config.storePath, config.remote);
-  const archiveInfo = getCodexArchiveInfo(getAgentRoot("codex"));
+  const archiveInfo = getCodexArchiveInfo(getAgentRoot("codex"), { gitRoot });
 
   if (config.remote) {
     const pulled = syncStoreFromRemote(config.storePath, config.remote);
@@ -247,7 +247,7 @@ function doctorCommand(gitRoot) {
   const config = existsSync(join(gitRoot, CONFIG_FILE)) ? readConfigWithBundle(gitRoot) : null;
   const codexRoot = getAgentRoot("codex");
   const claudeRoot = getAgentRoot("claude");
-  const codexArchive = getCodexArchiveInfo(codexRoot);
+  const codexArchive = getCodexArchiveInfo(codexRoot, config ? { gitRoot } : {});
   const checks = [];
   addCheck(checks, "git root", "ok", gitRoot);
   addCheck(checks, "node", "ok", process.version);
@@ -350,7 +350,7 @@ function describeBindings(config) {
 
 function describeCodexArchive(info) {
   const summary = summarizeCodexArchiveInfo(info);
-  return `${summary.archivedCount} archived session(s), state ${summary.stateStatus}, ${summary.sourceSummary}`;
+  return `${summary.archivedCount} archived session(s), state ${summary.stateStatus}, ${summary.sourceSummary}, cache ${summary.cacheStatus}`;
 }
 
 function countAgentFiles(root, archiveInfo = null) {
@@ -393,6 +393,9 @@ function printScan(scan, config) {
   console.log(`id:      ${config.projectId}`);
   console.log(`store:   ${config.storePath}`);
   console.log(`scan:    ${scan.candidates} candidate file(s), ${scan.matches.length} match(es)`);
+  if (scan.cache) {
+    console.log(`cache:   ${scan.cache.cached} reused, ${scan.cache.refreshed} refreshed`);
+  }
   if (!scan.matches.length) {
     console.log("hint: sessions are matched when their file content mentions this repo path or repo name.");
     return;

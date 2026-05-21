@@ -9,6 +9,7 @@ It solves one specific problem: source code can move with `git clone`, but local
 - Scans Codex sessions in `~/.codex/sessions/**/*.jsonl`
 - Skips archived Codex sessions by default: `~/.codex/archived_sessions/**/*.jsonl` and threads marked `archived = 1` in `state_5.sqlite`
 - Scans Claude Code sessions in `~/.claude/projects/**/*.jsonl`
+- Uses local mtime/size/hash caches so unchanged session files are not reread on every scan
 - Matches Codex sessions through native JSONL metadata first; Claude sessions keep path, remote, and repo-name matching
 - Copies matched sessions into a sidecar Git repo at `.agent-sync-store/`
 - Pushes and pulls that sidecar repo without adding sessions to your project commits
@@ -198,7 +199,11 @@ Both directories are added to the project `.gitignore`.
 ```text
 .agent-sync/config.json
 .agent-sync/last-scan.json
+.agent-sync/scan-cache.json
+.agent-sync/archive-cache.json
 ```
+
+`last-scan.json` is the latest human-readable scan result. `scan-cache.json` is an internal file index keyed by mtime, size, and hash, so unchanged session files can be reused without rereading their contents. `archive-cache.json` stores the Codex archived-session set and refreshes only when `state_5.sqlite` or `archived_sessions/` changes.
 
 `.agent-sync-store/` is an independent Git repository:
 
@@ -223,6 +228,8 @@ src/
   args.js            # CLI argument and selector validation
   agents.js          # Codex / Claude discovery and scan matching
   bindings.js        # Git context binding history
+  scan-cache.js      # Incremental session scan cache
+  codex-archive.js   # Codex archived-session detection and cache
   codex-session.js   # Codex JSONL metadata extraction and restore adaptation
   config.js          # Local project config and identity
   git.js             # Git root, remote, and worktree context
@@ -270,6 +277,8 @@ The suite includes:
 - `npm run smoke`: CLI entrypoint help output.
 - `npm run test:bindings`: `bindings.jsonl` compatibility and invalid-line handling.
 - `npm run test:codex-session`: Windows / macOS / Linux style Codex path adaptation.
+- `npm run test:scan-cache`: unchanged session files are reused from the local scan cache.
+- `npm run test:archive-cache`: archived Codex session sets are reused until archive state changes.
 - `npm run test:e2e`: two temporary project clones plus a bare sidecar remote, covering `push`, `pull`, `list --current`, `list --branch`, `list --commit`, `restore`, `doctor`, and verification that `.agent-sync-store` is not tracked by the business repo.
 
 ## Troubleshooting

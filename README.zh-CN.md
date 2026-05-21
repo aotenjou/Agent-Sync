@@ -14,6 +14,7 @@
 - 扫描 Codex 会话：`~/.codex/sessions/**/*.jsonl`
 - 默认跳过 Codex 已归档会话：`~/.codex/archived_sessions/**/*.jsonl`，以及 `state_5.sqlite` 里 `threads.archived = 1` 的线程
 - 扫描 Claude Code 会话：`~/.claude/projects/**/*.jsonl`
+- 使用本地 mtime/size/hash 缓存，未变化的 session 文件不会每次都重新读全文
 - Codex 会话优先根据 JSONL 原生元数据匹配项目；Claude 会话继续按路径、remote、仓库名匹配
 - 把匹配到的会话复制到 sidecar Git 仓库 `.agent-sync-store/`
 - 支持把 sidecar 仓库推送到专门的私有远程仓库
@@ -221,7 +222,11 @@ git agent-sync restore --commit 4f7c2a1 --no-adapt
 ```text
 .agent-sync/config.json
 .agent-sync/last-scan.json
+.agent-sync/scan-cache.json
+.agent-sync/archive-cache.json
 ```
+
+`last-scan.json` 是最近一次可读扫描结果。`scan-cache.json` 是内部文件索引，会按 mtime、size 和 hash 复用未变化文件的匹配结果，避免重复读完整 session。`archive-cache.json` 保存 Codex 已归档 session 集合，只有 `state_5.sqlite` 或 `archived_sessions/` 目录状态变化时才刷新。
 
 `.agent-sync-store/` 是一个独立的 sidecar Git 仓库，用来存会话备份：
 
@@ -246,6 +251,8 @@ src/
   args.js            # CLI 参数与 selector 校验
   agents.js          # Codex / Claude 发现与扫描匹配
   bindings.js        # Git context binding 历史索引
+  scan-cache.js      # 增量扫描缓存
+  codex-archive.js   # Codex 归档识别与缓存
   codex-session.js   # Codex JSONL 元数据提取与恢复适配
   config.js          # 本地项目配置与项目 identity
   git.js             # Git root、remote 与工作区上下文
@@ -293,6 +300,8 @@ npm run test
 - `npm run smoke`：CLI 入口帮助输出
 - `npm run test:bindings`：`bindings.jsonl` 兼容旧字段和坏行容错
 - `npm run test:codex-session`：Windows / macOS / Linux 风格 Codex 路径适配
+- `npm run test:scan-cache`：验证未变化 session 文件会复用本地扫描缓存
+- `npm run test:archive-cache`：验证 Codex 归档集合会复用缓存，并在归档状态变化时刷新
 - `npm run test:e2e`：用两个临时业务 clone 和一个 bare sidecar remote 覆盖 `push`、`pull`、`list --current`、`list --branch`、`list --commit`、`restore`、`doctor`，并验证 `.agent-sync-store` 不会被业务仓库跟踪
 
 ## 排查问题
