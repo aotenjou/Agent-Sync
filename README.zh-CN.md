@@ -15,7 +15,7 @@
 - 默认跳过 Codex 已归档会话：`~/.codex/archived_sessions/**/*.jsonl`，以及 `state_5.sqlite` 里 `threads.archived = 1` 的线程
 - 扫描 Claude Code 会话：`~/.claude/projects/**/*.jsonl`
 - 使用本地 mtime/size/hash 缓存，未变化的 session 文件不会每次都重新读全文
-- Codex 会话优先根据 JSONL 原生元数据匹配项目；Claude 会话继续按路径、remote、仓库名匹配
+- Codex 会话只根据 JSONL 原生元数据匹配项目；缺少 `git/cwd/workdir` 项目元数据，或已记录其他 Git remote / 项目路径时，会被拒绝同步
 - 把匹配到的会话复制到 sidecar Git 仓库 `.agent-sync-store/`
 - 支持把 sidecar 仓库推送到专门的私有远程仓库
 - 支持在另一台机器拉取 sidecar 仓库并恢复会话
@@ -169,6 +169,8 @@ git agent-sync doctor
 `manifest.json` 仍然表示最新快照。`bindings.jsonl` 用于历史查询，会记录 session bundle、同步时的 branch、`HEAD` commit、`baseCommit`，以及业务工作区当时是否 dirty。
 
 对于 Codex session，新写入的 binding 会优先使用 Codex 已经保存在 JSONL 里的 Git 上下文。Agent-Sync 会读取 `session_meta.payload.git.commit_hash`、`session_meta.payload.git.branch` 和 `session_meta.payload.git.repository_url`；当这些字段缺失，或者它们不属于当前业务项目时，再回退到 `push` 时业务仓库的 Git 状态。`dirty` 仍然取 `push` 时业务仓库的状态，因为 Codex session 里没有可靠的 per-session dirty 字段。
+
+为了避免不同项目的对话互相污染，Codex session 只使用结构化项目身份判断归属：`repository_url` 必须匹配当前业务仓库 remote，且 `cwd` / `workdir` 不能混入其他项目路径。已经明确属于其他 Git 仓库、其他项目路径、同一个 session 同时跨多个项目 workdir，或者完全缺少结构化项目身份的记录，即使正文里提到当前项目名，也不会被 `push`、`pull` 清理后的 manifest、或者 `restore` 接受。
 
 ```bash
 git agent-sync list --current

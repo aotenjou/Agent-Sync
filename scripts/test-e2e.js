@@ -52,6 +52,7 @@ run("git", ["push"], projectA);
 const currentCommit = run("git", ["rev-parse", "HEAD"], projectA);
 
 const sessionPath = join(codexA, "2026", "05", "21", "session.jsonl");
+const foreignSessionPath = join(codexA, "2026", "05", "21", "foreign-session.jsonl");
 const archivedPath = join(codexA, "archived_sessions", "archived-session.jsonl");
 writeJsonl(sessionPath, [
   {
@@ -80,6 +81,29 @@ writeJsonl(sessionPath, [
     }
   }
 ]);
+writeJsonl(foreignSessionPath, [
+  {
+    type: "session_meta",
+    payload: {
+      id: "foreign-session",
+      cwd: "/Users/woodq/FullStack/Agent-Sync",
+      git: {
+        commit_hash: "foreign-commit",
+        branch: "main",
+        repository_url: "https://github.com/Wood-Q/Agent-Sync.git"
+      }
+    }
+  },
+  { type: "turn_context", payload: { cwd: "/Users/woodq/FullStack/Agent-Sync" } },
+  {
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "user",
+      content: `This Agent-Sync session mentions ${projectName} but belongs elsewhere.`
+    }
+  }
+]);
 writeJsonl(archivedPath, [
   {
     type: "session_meta",
@@ -102,6 +126,7 @@ assert.match(pushOut, /archived removed/);
 assert.equal(run("git", ["status", "--porcelain", "--", ".agent-sync-store"], projectA), "");
 assert.equal(run("git", ["status", "--porcelain"], projectA), "");
 assert.equal(run("git", ["ls-files", ".agent-sync-store"], projectA), "");
+assert.equal(run("git", ["grep", "-n", "Agent-Sync", "HEAD", "--", "projects"], join(projectA, ".agent-sync-store"), { allowFail: true }), "");
 
 run("git", ["clone", bareProjectRemote, projectB], machineBParent);
 agent(projectB, codexB, claudeB, ["init", "--remote", bareStoreRemote]);
@@ -143,12 +168,15 @@ function agent(cwd, codexDir, claudeDir, args) {
 }
 
 function run(command, args, cwd, env = {}) {
+  const options = env && Object.prototype.hasOwnProperty.call(env, "allowFail")
+    ? { allowFail: env.allowFail, env: {} }
+    : { allowFail: false, env };
   const result = spawnSync(command, args, {
     cwd,
-    env: { ...process.env, ...env },
+    env: { ...process.env, ...options.env },
     encoding: "utf8"
   });
-  if (result.status !== 0) {
+  if (result.status !== 0 && !options.allowFail) {
     console.error(`FAILED: ${command} ${args.join(" ")}`);
     if (result.error) {
       console.error(result.error.message);

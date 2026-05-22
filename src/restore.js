@@ -4,7 +4,7 @@ import { getAgentRoot } from "./agents.js";
 import { queryBindings } from "./bindings.js";
 import { parseSelector, formatSelector } from "./args.js";
 import { findProjectBundle } from "./store.js";
-import { adaptCodexSessionContent } from "./codex-session.js";
+import { adaptCodexSessionContent, getCodexContentProjectMatch } from "./codex-session.js";
 import { expandHome, readJson } from "./utils.js";
 
 export function restoreCommand(gitRoot, args, options, config) {
@@ -41,6 +41,11 @@ export function restoreCommand(gitRoot, args, options, config) {
 function restoreMatches(config, matches, options = {}) {
   for (const match of matches) {
     const source = join(config.storePath, match.storeRelativePath);
+    const projectMatch = getRestoreProjectMatch(config, match, source);
+    if (!projectMatch.matched) {
+      console.log(`skipped ${match.agent}: ${source} (${projectMatch.reason})`);
+      continue;
+    }
     const target = getRestoreTarget(match);
     mkdirSync(dirname(target), { recursive: true });
     const result = restoreSessionFile(config, match, source, target, options);
@@ -77,4 +82,16 @@ function restoreSessionFile(config, match, source, target, options) {
 
 function shouldAdaptSessionFile(match, source) {
   return match.agent === "codex" && (source.endsWith(".jsonl") || source.endsWith(".json"));
+}
+
+function getRestoreProjectMatch(config, match, source) {
+  if (match.agent !== "codex") {
+    return { matched: true };
+  }
+  try {
+    const content = readFileSync(source, "utf8");
+    return getCodexContentProjectMatch(content, config);
+  } catch (error) {
+    return { matched: false, reason: `unreadable session (${error.message})` };
+  }
 }

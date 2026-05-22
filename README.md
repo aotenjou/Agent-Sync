@@ -10,7 +10,7 @@ It solves one specific problem: source code can move with `git clone`, but local
 - Skips archived Codex sessions by default: `~/.codex/archived_sessions/**/*.jsonl` and threads marked `archived = 1` in `state_5.sqlite`
 - Scans Claude Code sessions in `~/.claude/projects/**/*.jsonl`
 - Uses local mtime/size/hash caches so unchanged session files are not reread on every scan
-- Matches Codex sessions through native JSONL metadata first; Claude sessions keep path, remote, and repo-name matching
+- Matches Codex sessions only through native JSONL metadata; sessions missing project `git/cwd/workdir` metadata or recording another Git remote / project path are rejected
 - Copies matched sessions into a sidecar Git repo at `.agent-sync-store/`
 - Pushes and pulls that sidecar repo without adding sessions to your project commits
 - Restores pulled sessions back into the local Codex or Claude session directory
@@ -239,6 +239,8 @@ src/
 ```
 
 Codex scanning and restore adaptation follow Codex's native JSONL shape. The extractor reads per-session facts from `session_meta.payload.cwd`, `session_meta.payload.git`, `turn_context.payload.cwd`, and `response_item.payload.arguments.workdir`. Restore path mapping uses those structured fields first, then scans transcript strings only as a fallback, while skipping opaque fields such as `encrypted_content`.
+
+Codex project ownership is strict and based only on structured metadata: `repository_url` must match the current project remote, and `cwd` / `workdir` must not include another project path. A session that belongs to another Git repository, another project path, multiple project workdirs, or has no structured project metadata is skipped even if its transcript text mentions this project name, and restore applies the same guard before writing into the local Codex directory.
 
 Agent-Sync intentionally does not use these `.codex` files as core project/session truth:
 

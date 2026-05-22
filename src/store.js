@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { DEFAULT_STORE_BRANCH, DEFAULT_STORE_GITIGNORE, TOOL_VERSION } from "./constants.js";
 import { getProjectRemote, runGit } from "./git.js";
 import { isArchivedCodexSessionPath } from "./codex-archive.js";
+import { isCodexSessionContentForProject } from "./codex-session.js";
 import { scoreProjectManifest } from "./config.js";
 import { expandHome, normalizePath, readJson, toSlash, unique, writeJson } from "./utils.js";
 
@@ -144,6 +145,87 @@ export function pruneArchivedSidecarEntries(config, archiveInfo) {
   return { removedFiles, removedBindings, archivedOriginalPaths: archivedOriginalPaths.size };
 }
 
+export function pruneForeignProjectSidecarEntries(config) {
+  const bundleDir = getProjectBundleDir(config);
+  if (!existsSync(bundleDir)) {
+    return { removedFiles: 0, removedBindings: 0, removedManifestEntries: 0 };
+  }
+
+  const manifestPath = getManifestPath(config);
+  const foreignStorePaths = new Set();
+  const foreignBundleIds = new Set();
+  let removedManifestEntries = 0;
+
+  if (existsSync(manifestPath)) {
+    try {
+      const manifest = readJson(manifestPath);
+      const keptMatches = [];
+      for (const match of manifest.matches || []) {
+        if (isForeignCodexStoreMatch(config, match)) {
+          removedManifestEntries += 1;
+          foreignBundleIds.add(match.bundleId);
+          if (match.storeRelativePath) {
+            foreignStorePaths.add(join(config.storePath, match.storeRelativePath));
+          }
+          continue;
+        }
+        keptMatches.push(match);
+      }
+      if (removedManifestEntries) {
+        manifest.matches = keptMatches;
+        writeJson(manifestPath, manifest);
+      }
+    } catch {
+      // keep going; bindings cleanup still works below
+    }
+  }
+
+  const bindingsPath = join(bundleDir, "bindings.jsonl");
+  let removedBindings = 0;
+  if (existsSync(bindingsPath)) {
+    const raw = readFileSync(bindingsPath, "utf8");
+    const keptLines = [];
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line.trim()) {
+        continue;
+      }
+      let binding;
+      try {
+        binding = JSON.parse(line);
+      } catch {
+        keptLines.push(line);
+        continue;
+      }
+      const shouldRemove = binding?.agent === "codex" && (
+        foreignBundleIds.has(binding.bundleId) || isForeignCodexStoreMatch(config, binding)
+      );
+      if (shouldRemove) {
+        removedBindings += 1;
+        foreignBundleIds.add(binding.bundleId);
+        if (binding.storeRelativePath) {
+          foreignStorePaths.add(join(config.storePath, binding.storeRelativePath));
+        }
+        continue;
+      }
+      keptLines.push(line);
+    }
+    if (removedBindings) {
+      const content = keptLines.length ? `${keptLines.join("\n")}\n` : "";
+      writeFileSync(bindingsPath, content);
+    }
+  }
+
+  let removedFiles = 0;
+  for (const filePath of foreignStorePaths) {
+    if (existsSync(filePath)) {
+      unlinkSync(filePath);
+      removedFiles += 1;
+    }
+  }
+
+  return { removedFiles, removedBindings, removedManifestEntries };
+}
+
 export function copyMatchesToStore(config, scan, archiveInfo = null) {
   const copied = [];
   const projectDir = join(config.storePath, "projects", config.projectId);
@@ -256,6 +338,22 @@ export function findProjectBundle(config) {
     .sort((a, b) => b.score - a.score || a.projectId.localeCompare(b.projectId));
 
   return candidates[0]?.score > 0 ? candidates[0] : null;
+}
+
+function isForeignCodexStoreMatch(config, match) {
+  if (!match || match.agent !== "codex" || !match.storeRelativePath) {
+    return false;
+  }
+  const source = join(config.storePath, match.storeRelativePath);
+  if (!existsSync(source)) {
+    return false;
+  }
+  try {
+    const content = readFileSync(source, "utf8");
+    return !isCodexSessionContentForProject(content, config);
+  } catch {
+    return false;
+  }
 }
 
 export function getProjectBundleDir(config) {

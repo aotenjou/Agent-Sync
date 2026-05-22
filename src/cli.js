@@ -29,6 +29,7 @@ import {
   getManifestPath,
   pruneArchivedManifestEntries,
   pruneArchivedSidecarEntries,
+  pruneForeignProjectSidecarEntries,
   syncStoreFromRemote,
   writeManifest
 } from "./store.js";
@@ -169,6 +170,7 @@ function pushCommand(gitRoot) {
   writeJson(join(gitRoot, CACHE_FILE), scan);
 
   const pruned = pruneArchivedSidecarEntries(config, archiveInfo);
+  const foreignPruned = pruneForeignProjectSidecarEntries(config);
   const copied = copyMatchesToStore(config, scan, archiveInfo);
   writeManifest(config, scan, gitContext);
   const bindingsAdded = writeBindings(config, scan.matches, gitContext);
@@ -176,10 +178,10 @@ function pushCommand(gitRoot) {
   runGit(["add", "."], config.storePath);
   const diff = runGit(["diff", "--cached", "--quiet"], config.storePath, { allowFail: true });
   if (diff.status === 0) {
-    console.log(`agent-sync: no sidecar changes (${copied.length} matched sessions, ${pruned.removedFiles} archived removed).`);
+    console.log(`agent-sync: no sidecar changes (${copied.length} matched sessions, ${pruned.removedFiles} archived removed, ${foreignPruned.removedFiles} foreign removed).`);
   } else {
     runGit(["commit", "-m", `sync ${config.projectName} agent sessions`], config.storePath);
-    console.log(`agent-sync: committed ${copied.length} matched session file(s), ${bindingsAdded} new binding(s), ${pruned.removedFiles} archived removed.`);
+    console.log(`agent-sync: committed ${copied.length} matched session file(s), ${bindingsAdded} new binding(s), ${pruned.removedFiles} archived removed, ${foreignPruned.removedFiles} foreign removed.`);
   }
 
   if (config.remote) {
@@ -207,12 +209,17 @@ function pullCommand(gitRoot) {
 
   const pruned = pruneArchivedSidecarEntries(config, archiveInfo);
   const manifestPruned = pruneArchivedManifestEntries(config, archiveInfo);
+  const foreignPruned = pruneForeignProjectSidecarEntries(config);
   if (pruned.removedFiles || pruned.removedBindings) {
     console.log(`agent-sync: pruned ${pruned.removedFiles} archived file(s) and ${pruned.removedBindings} archived binding(s).`);
   }
   if (manifestPruned.removed) {
     console.log(`agent-sync: pruned ${manifestPruned.removed} archived manifest entr${manifestPruned.removed === 1 ? "y" : "ies"}.`);
   }
+  if (foreignPruned.removedFiles || foreignPruned.removedBindings || foreignPruned.removedManifestEntries) {
+    console.log(`agent-sync: pruned ${foreignPruned.removedFiles} foreign project file(s), ${foreignPruned.removedBindings} binding(s), and ${foreignPruned.removedManifestEntries} manifest entr${foreignPruned.removedManifestEntries === 1 ? "y" : "ies"}.`);
+  }
+  commitStoreCleanup(config, pruned, manifestPruned, foreignPruned);
 
   const bundle = findProjectBundle(config);
   if (bundle) {
@@ -241,6 +248,27 @@ fi
 `;
   writeFileSync(hookPath, hook, { mode: 0o755 });
   console.log(`agent-sync: installed pre-push hook at ${hookPath}`);
+}
+
+function commitStoreCleanup(config, archivedPruned, manifestPruned, foreignPruned) {
+  const changed = Boolean(
+    archivedPruned.removedFiles ||
+    archivedPruned.removedBindings ||
+    manifestPruned.removed ||
+    foreignPruned.removedFiles ||
+    foreignPruned.removedBindings ||
+    foreignPruned.removedManifestEntries
+  );
+  if (!changed) {
+    return;
+  }
+
+  runGit(["add", "."], config.storePath);
+  const diff = runGit(["diff", "--cached", "--quiet"], config.storePath, { allowFail: true });
+  if (diff.status !== 0) {
+    runGit(["commit", "-m", `prune ${config.projectName} sidecar sessions`], config.storePath);
+    console.log("agent-sync: committed sidecar cleanup locally; run push to publish it.");
+  }
 }
 
 function doctorCommand(gitRoot) {

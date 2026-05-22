@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { getCodexArchiveInfo, isArchivedCodexSessionPath, summarizeCodexArchiveInfo } from "./codex-archive.js";
 import { getProjectRemote, normalizeRemoteUrl } from "./git.js";
-import { extractCodexSessionMetadata, normalizeSessionPathReference } from "./codex-session.js";
+import { extractCodexSessionMetadata, getCodexProjectMatch } from "./codex-session.js";
 import {
   buildMatchBase,
   createScanCacheEntry,
@@ -113,25 +113,11 @@ function scanCandidate(candidate, cache, stats, needles, config, projectRemote) 
 }
 
 function matchCodexSession(metadata, content, needles, config, projectRemote) {
-  const metadataRemotes = metadata.gitContexts.map((item) => normalizeRemoteUrl(item.repositoryUrl || "")).filter(Boolean);
-  if (projectRemote && metadataRemotes.includes(projectRemote)) {
-    return [`git:${projectRemote}`];
+  const projectMatch = getCodexProjectMatch(metadata, content, config, projectRemote);
+  if (projectMatch.matched) {
+    return projectMatch.matchedBy;
   }
-
-  const projectRoot = normalizeSessionPathReference(config.projectRoot).toLowerCase();
-  const projectNameSuffix = `/${config.projectName.toLowerCase()}`;
-  const rootCandidates = [...metadata.projectRoots, ...metadata.workdirs]
-    .map(normalizeSessionPathReference)
-    .map((value) => value.toLowerCase());
-  if (rootCandidates.some((root) => root === projectRoot || root.endsWith(projectNameSuffix))) {
-    return ["codex:cwd"];
-  }
-
-  if (content.includes(config.projectName)) {
-    return ["codex:project-name"];
-  }
-
-  return needles.filter((needle) => content.includes(needle));
+  return [];
 }
 
 function findAgentFiles(agent, root) {

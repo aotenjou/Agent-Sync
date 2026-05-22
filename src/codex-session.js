@@ -41,6 +41,48 @@ export function extractCodexSessionMetadata(content) {
   return metadata;
 }
 
+export function getCodexProjectMatch(metadata, content, config, projectRemote = "") {
+  const remoteMatch = matchCodexRemote(metadata, projectRemote);
+  if (hasKnownDifferentRemote(metadata, projectRemote)) {
+    return { matched: false, reason: "codex:foreign-git" };
+  }
+
+  const pathOwnership = getCodexPathOwnership(metadata, config);
+  if (pathOwnership.foreign.length) {
+    return {
+      matched: false,
+      reason: pathOwnership.matched.length ? "codex:mixed-cwd" : "codex:foreign-cwd"
+    };
+  }
+
+  if (remoteMatch) {
+    return remoteMatch;
+  }
+
+  if (pathOwnership.matched.length) {
+    return { matched: true, matchedBy: ["codex:cwd"] };
+  }
+
+  if (hasStructuredProjectIdentity(metadata)) {
+    return { matched: false, reason: "codex:structured-no-match" };
+  }
+
+  return { matched: false, reason: "codex:missing-project-metadata" };
+}
+
+export function getCodexContentProjectMatch(content, config, projectRemote = getConfigRemoteIdentity(config)) {
+  const metadata = extractCodexSessionMetadata(content);
+  return getCodexProjectMatch(metadata, content, config, projectRemote);
+}
+
+export function isCodexSessionContentForProject(content, config, projectRemote = getConfigRemoteIdentity(config)) {
+  return getCodexContentProjectMatch(content, config, projectRemote).matched;
+}
+
+export function isCodexSessionForProject(metadata, config) {
+  return getCodexProjectMatch(metadata, "", config, getConfigRemoteIdentity(config)).matched;
+}
+
 export function getCodexBindingContext(metadata, fallbackGitContext, config = null, match = null) {
   const gitContexts = selectBindingGitContexts(metadata, config, match);
   const commits = gitContexts.map((item) => item.commit).filter(Boolean);
@@ -91,7 +133,58 @@ function getConfigRemoteIdentity(config) {
 function isProjectPathReference(value, config) {
   const path = normalizeSessionPathReference(value).toLowerCase();
   const projectRoot = normalizeSessionPathReference(config.projectRoot).toLowerCase();
-  return path === projectRoot || path.endsWith(`/${config.projectName.toLowerCase()}`);
+  if (path === projectRoot || path.startsWith(`${projectRoot}/`)) {
+    return true;
+  }
+  const projectName = config.projectName.toLowerCase();
+  return path.split("/").some((part) => cleanPathSegment(part).toLowerCase() === projectName);
+}
+
+function matchCodexRemote(metadata, projectRemote) {
+  if (!projectRemote) {
+    return null;
+  }
+  const metadataRemotes = getMetadataRemotes(metadata);
+  return metadataRemotes.includes(projectRemote)
+    ? { matched: true, matchedBy: [`git:${projectRemote}`] }
+    : null;
+}
+
+function hasKnownDifferentRemote(metadata, projectRemote) {
+  if (!projectRemote) {
+    return false;
+  }
+  const metadataRemotes = getMetadataRemotes(metadata);
+  return metadataRemotes.length > 0 && !metadataRemotes.includes(projectRemote);
+}
+
+function getMetadataRemotes(metadata) {
+  return unique(
+    (metadata.gitContexts || [])
+      .map((item) => normalizeRemoteUrl(item.repositoryUrl || ""))
+      .filter(Boolean)
+  );
+}
+
+function hasStructuredProjectIdentity(metadata) {
+  return getMetadataRemotes(metadata).length > 0 || getStructuredProjectPaths(metadata).length > 0;
+}
+
+function getStructuredProjectPaths(metadata) {
+  return unique([...(metadata.projectRoots || []), ...(metadata.workdirs || [])].filter(Boolean));
+}
+
+function getCodexPathOwnership(metadata, config) {
+  const matched = [];
+  const foreign = [];
+  for (const path of getStructuredProjectPaths(metadata)) {
+    if (isProjectPathReference(path, config)) {
+      matched.push(path);
+    } else {
+      foreign.push(path);
+    }
+  }
+  return { matched, foreign };
 }
 
 export function adaptCodexSessionContent(content, config) {
@@ -508,7 +601,7 @@ function isWindowsPath(value) {
 }
 
 function isPosixPath(value) {
-  return isDarwinPath(value) || isLinuxPath(value);
+  return typeof value === "string" && /^\//.test(value);
 }
 
 function isDarwinPath(value) {

@@ -90,6 +90,13 @@ Codex session 会优先读取 JSONL 里的原生结构字段，例如：
 - `turn_context.payload.cwd`
 - `exec_command.arguments.workdir`
 
+这些结构化字段也是项目归属的硬边界：
+
+- 如果 `repository_url` 指向当前业务仓库 remote，且 `cwd` / `workdir` 没有混入其他项目路径，则认为属于当前项目。
+- 如果没有可用 remote，但 `cwd` / `workdir` 指向当前项目根或同名项目根，且没有混入其他项目路径，则认为属于当前项目。
+- 如果 session 已经明确记录了其他 Git remote、其他项目路径，或者同时跨多个项目 workdir，即使正文里提到当前项目名，也不会被当作当前项目 session。
+- 如果 session 完全缺少结构化项目身份，也不会只因为正文里出现项目名而被同步。这样会牺牲少量老格式兼容性，但可以保证不同项目的 session 不互相污染。
+
 Claude session 暂时继续使用路径、remote、仓库名等文本匹配逻辑。
 
 扫描结果会写入：
@@ -156,6 +163,7 @@ git agent-sync pull
 - 初始化或更新本机 `.agent-sync-store/`。
 - 从私有 session store 远程仓库拉取 sidecar 数据。
 - 根据当前项目 identity、legacy id、项目名等信息找到兼容的 project bundle。
+- 清理该 bundle 中已经明确属于其他 Codex 项目的历史残留，避免旧版本误同步的数据继续被恢复。
 
 `pull` 只同步 sidecar store，不会立刻写入 `~/.codex` 或 `~/.claude`。
 

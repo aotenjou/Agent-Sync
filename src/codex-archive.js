@@ -171,7 +171,19 @@ function archiveSignature(codexHome, statePath, archivedSessionsDir) {
   return {
     codexHome: normalizePath(codexHome),
     state: fileSignature(statePath),
-    archivedDir: fileSignature(archivedSessionsDir)
+    archivedDir: directorySignature(archivedSessionsDir)
+  };
+}
+
+function directorySignature(path) {
+  const signature = fileSignature(path);
+  if (!signature.exists) {
+    return signature;
+  }
+  const files = walk(path).sort();
+  return {
+    ...signature,
+    files: files.map((file) => [normalizePath(file), fileSignature(file)])
   };
 }
 

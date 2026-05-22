@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { adaptCodexSessionContent, extractCodexSessionMetadata } from "../src/codex-session.js";
+import {
+  adaptCodexSessionContent,
+  extractCodexSessionMetadata,
+  getCodexContentProjectMatch,
+  isCodexSessionContentForProject
+} from "../src/codex-session.js";
 
 const targetRoot = "/Users/test/workspace/MokioAgent";
 const localShell = process.platform === "win32" ? process.env.ComSpec || "cmd.exe" : process.env.SHELL || "/bin/sh";
@@ -49,6 +54,57 @@ for (const fixture of [
   const shouldChangeShell = process.platform === "win32" ? fixture.name !== "windows" : fixture.name === "windows";
   assert.equal(args.shell, shouldChangeShell ? localShell : fixture.shell);
 }
+
+const mokioConfig = {
+  projectIdentity: "git:github.com/wood-q/mokioagent",
+  projectName: "MokioAgent",
+  projectRoot: targetRoot
+};
+const agentSyncContent = makeSession({
+  name: "agent-sync",
+  root: "/Users/woodq/FullStack/Agent-Sync",
+  shell: "zsh",
+  cmd: "echo discussing MokioAgent from Agent-Sync"
+}).replace("https://example.com/agent-sync/MokioAgent.git", "https://github.com/Wood-Q/Agent-Sync.git");
+const foreignMatch = getCodexContentProjectMatch(agentSyncContent, mokioConfig);
+assert.equal(foreignMatch.matched, false);
+assert.equal(foreignMatch.reason, "codex:foreign-git");
+assert.equal(isCodexSessionContentForProject(agentSyncContent, mokioConfig), false);
+
+const mixedContent = makeSession({
+  name: "mixed",
+  root: targetRoot,
+  shell: "zsh",
+  cmd: "ls /Users/woodq/FullStack/Agent-Sync"
+}).replace("https://example.com/mixed/MokioAgent.git", "https://github.com/Wood-Q/MokioAgent.git");
+const mixedLines = parseJsonl(mixedContent);
+mixedLines.push({
+  type: "response_item",
+  payload: {
+    type: "function_call",
+    name: "exec_command",
+    arguments: JSON.stringify({
+      cmd: "pwd",
+      workdir: "/Users/woodq/FullStack/Agent-Sync",
+      shell: "zsh"
+    })
+  }
+});
+const mixedMatch = getCodexContentProjectMatch(`${mixedLines.map((line) => JSON.stringify(line)).join("\n")}\n`, mokioConfig);
+assert.equal(mixedMatch.matched, false);
+assert.equal(mixedMatch.reason, "codex:mixed-cwd");
+
+const unstructuredContent = `${JSON.stringify({
+  type: "response_item",
+  payload: {
+    type: "message",
+    role: "user",
+    content: "This mentions MokioAgent but has no Codex project metadata."
+  }
+})}\n`;
+const unstructuredMatch = getCodexContentProjectMatch(unstructuredContent, mokioConfig);
+assert.equal(unstructuredMatch.matched, false);
+assert.equal(unstructuredMatch.reason, "codex:missing-project-metadata");
 
 console.log("codex session path adaptation test passed");
 
