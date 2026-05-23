@@ -1,9 +1,13 @@
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { sha256, normalizePath, unique } from "./utils.js";
 import { normalizeRemoteUrl } from "./git.js";
 
 export function extractCodexSessionMetadata(content) {
   const metadata = {
     sessionId: null,
+    title: null,
     projectRoots: [],
     workdirs: [],
     gitContexts: []
@@ -19,6 +23,7 @@ export function extractCodexSessionMetadata(content) {
 
     if (item.type === "session_meta") {
       metadata.sessionId ||= payload.id || null;
+      metadata.title ||= payload.thread_name || payload.title || payload.name || null;
       addPath(projectRoots, payload.cwd);
       if (payload.git && typeof payload.git === "object") {
         metadata.gitContexts.push({
@@ -30,6 +35,8 @@ export function extractCodexSessionMetadata(content) {
       }
     } else if (item.type === "turn_context") {
       addPath(projectRoots, payload.cwd);
+    } else if (item.type === "event_msg" && payload.type === "thread_name_updated") {
+      metadata.title = payload.thread_name || metadata.title;
     } else if (item.type === "response_item" && payload.type === "function_call" && payload.name === "exec_command") {
       const args = parseArguments(payload.arguments);
       addPath(workdirs, args?.workdir);
@@ -39,6 +46,29 @@ export function extractCodexSessionMetadata(content) {
   metadata.projectRoots = [...projectRoots];
   metadata.workdirs = [...workdirs];
   return metadata;
+}
+
+export function loadCodexSessionTitles(codexHome = join(homedir(), ".codex")) {
+  const titles = new Map();
+  const indexPath = join(codexHome, "session_index.jsonl");
+  if (!existsSync(indexPath)) {
+    return titles;
+  }
+
+  for (const line of readFileSync(indexPath, "utf8").split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const item = JSON.parse(line);
+      if (item.id && item.thread_name) {
+        titles.set(item.id, item.thread_name);
+      }
+    } catch {
+      // Ignore partial index lines.
+    }
+  }
+  return titles;
 }
 
 export function getCodexProjectMatch(metadata, content, config, projectRemote = "") {
@@ -242,18 +272,18 @@ function rewriteCodexJsonl(content, context) {
 function adaptCodexSessionItem(item, context) {
   let adapted = false;
   const payload = item.payload;
-  if (!payload || typeof payload !== "object") {
-    return false;
-  }
-
-  if (item.type === "response_item" && payload.type === "function_call" && payload.name === "exec_command") {
+  if (payload && typeof payload === "object" && item.type === "response_item" && payload.type === "function_call" && payload.name === "exec_command") {
     if (adaptExecCommandArguments(payload, context)) {
       adapted = true;
     }
   }
 
-  if (replaceProjectPathReferences(payload, context.pathMappings)) {
+  if (replaceProjectPathReferences(item, context.pathMappings)) {
     adapted = true;
+  }
+
+  if (!payload || typeof payload !== "object") {
+    return adapted;
   }
 
   if (item.type === "session_meta") {
@@ -368,7 +398,7 @@ function collectProjectPathRoots(value, projectName, roots) {
 function extractProjectPathRoots(value, projectName) {
   const roots = [];
   const windowsPaths = value.match(/[A-Za-z]:[\\/][^\r\n"'<>|]*/g) || [];
-  const posixPaths = value.match(/\/(?:Users|home|workspace)\/[^\r\n"'`]*/g) || [];
+  const posixPaths = value.match(/\/[^\s\r\n"'`]*/g) || [];
   for (const candidate of [...windowsPaths, ...posixPaths]) {
     const root = truncatePathAtProjectName(candidate, projectName);
     if (root) {
@@ -435,7 +465,7 @@ function replaceProjectPathReferences(value, mappings) {
   }
 
   for (const [key, child] of Object.entries(value)) {
-    if (key === "encrypted_content") {
+    if (shouldSkipPathRewriteKey(key)) {
       continue;
     }
     if (typeof child === "string") {
@@ -449,6 +479,10 @@ function replaceProjectPathReferences(value, mappings) {
     }
   }
   return changed;
+}
+
+function shouldSkipPathRewriteKey(key) {
+  return key === "encrypted_content";
 }
 
 function replaceProjectPathString(value, mappings) {

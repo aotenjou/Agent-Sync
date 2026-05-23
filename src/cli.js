@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import {
   CACHE_FILE,
@@ -12,6 +12,7 @@ import {
 import { parseArgs, parseSelector, formatSelector } from "./args.js";
 import { getAgentRoot, scanSessions } from "./agents.js";
 import { getBindingsPath, inspectBindings, queryBindings, writeBindings } from "./bindings.js";
+import { extractCodexSessionMetadata, loadCodexSessionTitles } from "./codex-session.js";
 import {
   legacyProjectIdForPath,
   readConfig,
@@ -80,7 +81,7 @@ Usage:
   git agent-sync push
   git agent-sync pull
   git agent-sync scan [--json]
-  git agent-sync restore <bundle-id>|--all|--current|--branch <name>|--commit <sha> [--no-adapt]
+  git agent-sync restore <bundle-id>|--all|--current|--branch <name>|--commit <sha> [index|--index <n>] [--no-adapt]
   git agent-sync install-hooks
   git agent-sync doctor
 
@@ -155,7 +156,7 @@ function listCommand(gitRoot, options) {
     return;
   }
 
-  printBindings(bindings, selector);
+  printBindings(config, bindings, selector);
 }
 
 function pushCommand(gitRoot) {
@@ -433,12 +434,95 @@ function printScan(scan, config) {
   }
 }
 
-function printBindings(bindings, selector) {
+function printBindings(config, bindings, selector) {
+  const titles = loadCodexSessionTitles();
   console.log(`selector: ${formatSelector(selector)}`);
   console.log(`bindings: ${bindings.length}`);
-  for (const binding of bindings) {
+  if (bindings.length) {
+    console.log(`restore:  git agent-sync restore ${formatSelectorForCommand(selector)} <index>`);
+  }
+  bindings.forEach((binding, index) => {
     const branch = binding.branch || "detached";
     const dirty = binding.dirty ? "dirty" : "clean";
-    console.log(`- ${binding.bundleId} ${binding.agent} ${binding.headCommit} ${branch} ${dirty} ${binding.originalPath}`);
+    const title = getBindingTitle(config, binding, titles);
+    console.log(`${index + 1}. ${title}`);
+    console.log(`   ${binding.bundleId} ${binding.agent} ${binding.headCommit || "no-commit"} ${branch} ${dirty}`);
+    console.log(`   ${binding.originalPath}`);
+  });
+}
+
+function getBindingTitle(config, binding, titles) {
+  if (binding.title) {
+    return binding.title;
   }
+  if (binding.agent === "codex") {
+    const title = titles.get(binding.sessionId) || getStoredSessionTitle(config, binding);
+    if (title) {
+      return title;
+    }
+  }
+  const storedTitle = getStoredSessionTitle(config, binding);
+  if (storedTitle) {
+    return storedTitle;
+  }
+  return binding.bundleId;
+}
+
+function formatSelectorForCommand(selector) {
+  if (selector.type === "current") {
+    return "--current";
+  }
+  return `--${selector.type} ${selector.value}`;
+}
+
+function getStoredSessionTitle(config, binding) {
+  if (!binding.storeRelativePath) {
+    return null;
+  }
+  try {
+    const content = readFileSync(join(config.storePath, binding.storeRelativePath), "utf8");
+    if (binding.agent === "codex") {
+      return extractCodexSessionMetadata(content).title || null;
+    }
+    if (binding.agent === "claude") {
+      return getClaudeSessionTitle(content);
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function getClaudeSessionTitle(content) {
+  for (const line of content.split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const item = JSON.parse(line);
+      const title = getClaudeItemTitle(item);
+      if (title) {
+        return title;
+      }
+    } catch {
+      // Ignore partial JSONL lines.
+    }
+  }
+  return null;
+}
+
+function getClaudeItemTitle(item) {
+  const text = item?.message?.content
+    ?.map((entry) => typeof entry?.text === "string" ? entry.text : "")
+    .find((value) => value && !isLowSignalTitle(value));
+  return text ? compactTitle(text) : null;
+}
+
+function isLowSignalTitle(value) {
+  const text = value.trim();
+  return text.startsWith("<ide_") || text.startsWith("Base directory for this skill:");
+}
+
+function compactTitle(value) {
+  return value.replace(/\s+/g, " ").trim().slice(0, 96);
 }

@@ -58,6 +58,7 @@ writeJsonl(sessionPath, [
   {
     type: "session_meta",
     payload: {
+      thread_name: "Continue e2e session",
       id: "session-current",
       cwd: windowsRoot,
       git: {
@@ -139,9 +140,15 @@ const byCommit = JSON.parse(agent(projectB, codexB, claudeB, ["list", "--commit"
 assert.equal(byCurrent.length, 1);
 assert.equal(byBranch.length, 1);
 assert.equal(byCommit.length, 1);
+assert.equal(byCurrent[0].title, "Continue e2e session");
+
+const listOut = agent(projectB, codexB, claudeB, ["list", "--current"]);
+assert.match(listOut, /1\. Continue e2e session/);
+assert.match(listOut, /restore:\s+git agent-sync restore --current <index>/);
 
 const restoreOut = agent(projectB, codexB, claudeB, ["restore", "--current"]);
 assert.match(restoreOut, /restored codex:/);
+assert.match(agent(projectB, codexB, claudeB, ["restore", "--current", "1"]), /restored codex:/);
 assert.match(agent(projectB, codexBranch, claudeB, ["restore", "--branch", "main"]), /restored codex:/);
 assert.match(agent(projectB, codexCommit, claudeB, ["restore", "--commit", currentCommit.slice(0, 8)]), /restored codex:/);
 const restored = parseJsonl(readFileSync(join(codexB, "2026", "05", "21", "session.jsonl"), "utf8"));

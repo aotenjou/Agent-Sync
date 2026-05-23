@@ -48,6 +48,7 @@ for (const fixture of [
   assert.equal(args.workdir, targetRoot);
   assert.equal(args.cmd.endsWith(`${targetRoot}/src`), true);
   assert.equal(lines[3].payload.output.endsWith(`${targetRoot}/src/index.js`), true);
+  assert.equal(lines[3].edited_files[0], `${targetRoot}/src/index.js`);
   assert.equal(lines[3].payload.encrypted_content, `keep ${fixture.root}\\secret.txt`);
   assert.ok(lines[0].payload.agentSyncAdapted);
 
@@ -137,7 +138,8 @@ function makeSession({ name, root, shell, cmd }) {
         type: "function_call_output",
         output: `opened ${root}\\src\\index.js`,
         encrypted_content: `keep ${root}\\secret.txt`
-      }
+      },
+      edited_files: [`${root}\\src\\index.js`]
     }
   ].map((line) => JSON.stringify(line)).join("\n") + "\n";
 }

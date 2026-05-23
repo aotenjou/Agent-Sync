@@ -19,6 +19,10 @@ export function parseArgs(rawArgs) {
       options.current = true;
     } else if (arg === "--no-adapt") {
       options.noAdapt = true;
+    } else if (arg.startsWith("--index=")) {
+      options.index = arg.slice("--index=".length);
+    } else if (arg === "--index") {
+      options.index = rawArgs[++i];
     } else if (arg.startsWith("--branch=")) {
       options.branch = arg.slice("--branch=".length);
     } else if (arg === "--branch") {

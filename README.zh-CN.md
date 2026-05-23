@@ -122,8 +122,11 @@ git agent-sync pull
 git agent-sync restore <bundle-id>
 git agent-sync restore --all
 git agent-sync restore --current
+git agent-sync restore --current 1
 git agent-sync restore --branch <name>
+git agent-sync restore --branch <name> 1
 git agent-sync restore --commit <sha>
+git agent-sync restore --commit <sha> 1
 git agent-sync restore --current --no-adapt
 git agent-sync install-hooks
 git agent-sync doctor
@@ -178,12 +181,22 @@ git agent-sync list --branch main
 git agent-sync list --commit 4f7c2a1
 ```
 
+普通输出会把会话标题放在最前面，并为每条结果加上编号，方便从结果里挑一个恢复。`--json` 会保留机器可读的原始 binding 列表。
+
 恢复命令也支持相同 selector：
 
 ```bash
 git agent-sync restore --current
 git agent-sync restore --branch main
 git agent-sync restore --commit 4f7c2a1
+```
+
+如果 selector 匹配多条 session，可以追加编号只恢复其中一条：
+
+```bash
+git agent-sync restore --current 1
+git agent-sync restore --branch main 2
+git agent-sync restore --commit 4f7c2a1 3
 ```
 
 commit 是主要查询锚点。`--current` 会先匹配当前 `HEAD` commit；如果没有结果，再回退匹配当前 branch。branch 只是同步发生时的历史标签，不代表会跟随可变分支指针。detached HEAD 同步时会记录 `branch: null`，仍然可以通过 commit 查询。
@@ -197,7 +210,7 @@ Codex session 文件里可能记录创建会话时的 shell、工作目录和项
 - `session_meta.payload.cwd`、`turn_context.payload.cwd`、`event_msg.payload.cwd` 会映射为当前业务仓库根目录。
 - `exec_command` function call 里的 `workdir` 会映射为当前业务仓库根目录。
 - `exec_command` function call 里的 `shell` 会映射为当前机器 shell，例如 macOS / Linux 上的 `$SHELL`。
-- transcript 字符串、命令参数、命令输出、sandbox 元数据里的源项目根路径引用会映射为当前业务仓库根目录。
+- transcript 字符串、命令参数、命令输出、sandbox 元数据、已编辑文件列表里的源项目根路径引用会映射为当前业务仓库根目录。
 - 不会翻译命令语法。历史 PowerShell 命令仍然会作为历史 transcript 保留，但命令里嵌入的源项目路径会被映射为当前项目路径。
 - 恢复后的 Codex session 会在 `session_meta.payload` 写入 `agentSyncAdapted` 标记，方便后续审计。
 

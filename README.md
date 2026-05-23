@@ -99,8 +99,11 @@ git agent-sync pull
 git agent-sync restore <bundle-id>
 git agent-sync restore --all
 git agent-sync restore --current
+git agent-sync restore --current 1
 git agent-sync restore --branch <name>
+git agent-sync restore --branch <name> 1
 git agent-sync restore --commit <sha>
+git agent-sync restore --commit <sha> 1
 git agent-sync restore --current --no-adapt
 git agent-sync install-hooks
 git agent-sync doctor
@@ -153,12 +156,22 @@ git agent-sync list --branch main
 git agent-sync list --commit 4f7c2a1
 ```
 
+Human-readable output shows the conversation title first and numbers each result. `--json` keeps returning the raw machine-readable bindings.
+
 Restore can use the same selectors:
 
 ```bash
 git agent-sync restore --current
 git agent-sync restore --branch main
 git agent-sync restore --commit 4f7c2a1
+```
+
+When a selector matches multiple sessions, append the displayed number to restore only one:
+
+```bash
+git agent-sync restore --current 1
+git agent-sync restore --branch main 2
+git agent-sync restore --commit 4f7c2a1 3
 ```
 
 Commit matching is the primary lookup path. `--current` first matches the current `HEAD` commit, then falls back to the current branch if no commit binding exists. Branches are historical labels from sync time; they do not follow mutable branch pointers. Detached HEAD syncs store `branch: null` and remain queryable by commit.
@@ -172,7 +185,7 @@ By default, `restore` keeps the sidecar source file unchanged and adapts only th
 - `session_meta.payload.cwd`, `turn_context.payload.cwd`, and `event_msg.payload.cwd` are mapped to the current project root.
 - `exec_command` function-call `workdir` is mapped to the current project root.
 - `exec_command` function-call `shell` is mapped to the current machine shell, such as `$SHELL` on macOS or Linux.
-- Source project-root path references inside transcript strings, command arguments, outputs, and sandbox metadata are mapped to the current project root.
+- Source project-root path references inside transcript strings, command arguments, outputs, sandbox metadata, and edited-file lists are mapped to the current project root.
 - Command syntax is not translated. A historical PowerShell command remains a PowerShell command in the transcript, but any embedded source project path is remapped.
 - Restored Codex sessions get an `agentSyncAdapted` marker in `session_meta.payload` for auditability.
 

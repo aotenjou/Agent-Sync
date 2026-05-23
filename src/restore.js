@@ -10,13 +10,15 @@ import { expandHome, readJson } from "./utils.js";
 export function restoreCommand(gitRoot, args, options, config) {
   const bundleId = args[0];
   const selector = parseSelector(options, { requireSelector: false });
-  const restoreModes = [Boolean(bundleId), Boolean(options.all), Boolean(selector)].filter(Boolean).length;
+  const selectorIndex = parseRestoreIndex(args, options, Boolean(selector));
+  const restoreModes = [Boolean(bundleId && !selector), Boolean(options.all), Boolean(selector)].filter(Boolean).length;
   if (restoreModes !== 1) {
     throw new Error("restore requires exactly one of a bundle id, --all, --current, --branch, or --commit");
   }
 
   if (selector) {
-    const matches = queryBindings(config, selector, gitRoot);
+    const allMatches = queryBindings(config, selector, gitRoot);
+    const matches = selectRestoreMatches(allMatches, selectorIndex, selector);
     if (!matches.length) {
       throw new Error(`no bindings found for ${formatSelector(selector)}`);
     }
@@ -36,6 +38,31 @@ export function restoreCommand(gitRoot, args, options, config) {
   }
 
   restoreMatches(config, matches, options);
+}
+
+function parseRestoreIndex(args, options, hasSelector) {
+  const value = options.index ?? (hasSelector ? args[0] : null);
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (!/^\d+$/.test(String(value))) {
+    throw new Error("restore index must be a positive number");
+  }
+  const index = Number(value);
+  if (index < 1) {
+    throw new Error("restore index must be a positive number");
+  }
+  return index;
+}
+
+function selectRestoreMatches(matches, index, selector) {
+  if (!index) {
+    return matches;
+  }
+  if (index > matches.length) {
+    throw new Error(`restore index ${index} is out of range for ${formatSelector(selector)} (${matches.length} binding(s))`);
+  }
+  return matches[index - 1] ? [matches[index - 1]] : [];
 }
 
 function restoreMatches(config, matches, options = {}) {

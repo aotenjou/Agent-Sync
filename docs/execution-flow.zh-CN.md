@@ -182,6 +182,7 @@ git agent-sync list --commit 4f7c2a1
 - `--commit <sha>` 匹配 `headCommit` 或 `baseCommit`，支持短 SHA。
 - `--branch <name>` 匹配历史记录里的 branch 标签，不解析当前分支指针。
 - `--current` 先匹配当前 `HEAD` commit；如果没有结果，再回退到当前 branch。
+- 普通输出会显示会话标题并加编号，方便后续指定恢复；`--json` 保持输出原始 binding 列表。
 
 也就是说，当你切换到某个历史 commit 或 branch 后，可以直接找回当时相关的 agent session。
 
@@ -191,8 +192,11 @@ git agent-sync list --commit 4f7c2a1
 
 ```bash
 git agent-sync restore --current
+git agent-sync restore --current 1
 git agent-sync restore --branch main
+git agent-sync restore --branch main 2
 git agent-sync restore --commit 4f7c2a1
+git agent-sync restore --commit 4f7c2a1 3
 git agent-sync restore --all
 ```
 
@@ -205,7 +209,7 @@ Codex session 默认会在恢复时做轻量跨平台适配：
 
 - 把源机器项目根路径映射为当前业务仓库根路径。
 - 把 Windows shell 与 POSIX shell 做安全切换。
-- 修正 `cwd`、`workdir`、结构化命令参数和 transcript 里的项目路径。
+- 修正 `cwd`、`workdir`、结构化命令参数、transcript 和已编辑文件列表里的项目路径。
 - 不修改 sidecar store 中的原始 session 文件。
 - 不翻译 PowerShell / bash / zsh 命令语法。
 
