@@ -6,10 +6,10 @@ It solves one specific problem: source code can move with `git clone`, but local
 
 ## What It Does
 
-- Scans Codex sessions in `~/.codex/sessions/**/*.jsonl`
+- Reads current-project Codex sessions from the `state_5.sqlite` `threads` table first, then uses `rollout_path` to locate JSONL files
 - Skips archived Codex sessions by default: `~/.codex/archived_sessions/**/*.jsonl` and threads marked `archived = 1` in `state_5.sqlite`
 - Uses local mtime/size/hash caches so unchanged session files are not reread on every scan
-- Matches Codex sessions only through native JSONL metadata; sessions missing project `git/cwd/workdir` metadata or recording another Git remote / project path are rejected
+- Matches Codex sessions only through structured project metadata from Codex state or JSONL; sessions missing project metadata or recording another Git remote / project path are rejected
 - Copies matched sessions into a sidecar Git repo at `.agent-sync-store/`
 - Pushes and pulls that sidecar repo without adding sessions to your project commits
 - Restores pulled sessions back into the local Codex session directory
@@ -156,9 +156,10 @@ Each `push` writes a lightweight historical index at:
   projects/
     <project-id>/
       bindings.jsonl
+      bindings.idx.json
 ```
 
-`manifest.json` remains the latest snapshot. `bindings.jsonl` is used for Git-style history lookup and records the Codex snapshot bundle, sync run, project branch, project `HEAD` commit, and whether the project worktree was dirty when the snapshot was synced.
+`manifest.json` remains the latest snapshot. `bindings.jsonl` is append-only Git-style history and records the Codex snapshot bundle, sync run, project branch, project `HEAD` commit, and whether the project worktree was dirty when the snapshot was synced. `bindings.idx.json` is a rebuildable lookup cache derived from `bindings.jsonl` for faster `log`, `show`, and selector-based `restore`.
 
 The primary anchor is the business repo commit at `git agent-sync push` time. Codex session-internal `session_meta.payload.git.commit_hash` is only used for project ownership checks, not as the restore lookup commit.
 
@@ -242,10 +243,9 @@ Both directories are added to the project `.gitignore`.
     <project-id>/
       manifest.json
       bindings.jsonl
+      bindings.idx.json
       codex/
         codex-<hash>.jsonl
-      claude/
-        claude-<hash>.jsonl
 ```
 
 ## Source Layout
@@ -255,7 +255,7 @@ The CLI entrypoint is intentionally small. `src/cli.js` handles command dispatch
 ```text
 src/
   args.js            # CLI argument and selector validation
-  agents.js          # Codex / Claude discovery and scan matching
+  agents.js          # Codex state / JSONL discovery and scan matching
   bindings.js        # Git context binding history
   scan-cache.js      # Incremental session scan cache
   codex-archive.js   # Codex archived-session detection and cache
@@ -267,7 +267,7 @@ src/
   utils.js           # Shared JSON, hash, path, and walk helpers
 ```
 
-Codex scanning and restore adaptation follow Codex's native JSONL shape. The extractor reads per-session facts from `session_meta.payload.cwd`, `session_meta.payload.git`, `turn_context.payload.cwd`, and `response_item.payload.arguments.workdir`. Restore path mapping uses those structured fields first, then scans transcript strings only as a fallback, while skipping opaque fields such as `encrypted_content`.
+Codex scanning and restore adaptation follow Codex's native data shape. Project ownership first reuses `state_5.sqlite` `threads.cwd`, `threads.git_origin_url`, `threads.git_branch`, `threads.git_sha`, and `threads.rollout_path`, which is the same kind of source Codex UI uses for project grouping. When those state project fields are missing, the extractor falls back to JSONL facts from `session_meta.payload.cwd`, `session_meta.payload.git`, `turn_context.payload.cwd`, and `response_item.payload.arguments.workdir`. Restore path mapping uses structured fields first, then scans transcript strings only as a fallback, while skipping opaque fields such as `encrypted_content`.
 
 Session titles reuse Codex UI's own sources where possible. During `push`, Agent-Sync first reads `state_5.sqlite` `threads.title`, then falls back to `threads.preview`, `threads.first_user_message`, `session_index.jsonl` `thread_name`, JSONL thread-name events, and the first useful user message. The resolved title is written to `bindings.jsonl`, so another machine can show the same `log` / `show` title after `pull` even without the source machine's `state_5.sqlite`.
 
@@ -282,11 +282,10 @@ Agent-Sync intentionally does not use these `.codex` files as core project/sessi
 
 ## Non-Standard Session Paths
 
-For tests or custom installs, override discovery roots:
+For tests or custom installs, override the Codex discovery root. `AGENT_SYNC_CODEX_DIR` can point at either `.codex` or `.codex/sessions`:
 
 ```bash
 AGENT_SYNC_CODEX_DIR=/path/to/codex/sessions git agent-sync status
-AGENT_SYNC_CLAUDE_DIR=/path/to/claude/projects git agent-sync status
 ```
 
 Windows PowerShell example:

@@ -145,6 +145,7 @@ assert.equal(byLatest.length, 1);
 assert.equal(byCurrent.length, 1);
 assert.equal(byBranch.length, 1);
 assert.equal(byCommit.length, 1);
+assert.equal(existsSync(join(projectB, ".agent-sync-store", "projects", byCurrent[0].projectId, "bindings.idx.json")), true);
 assert.equal(byCurrent[0].title, "Continue e2e session");
 assert.equal(byCurrent[0].projectCommit, currentCommit);
 assert.match(readFileSync(join(projectB, ".agent-sync-store", byCurrent[0].storeRelativePath), "utf8"), /session-current/);

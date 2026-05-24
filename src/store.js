@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync, copyFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, copyFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DEFAULT_STORE_BRANCH, DEFAULT_STORE_GITIGNORE, TOOL_VERSION } from "./constants.js";
 import { getProjectRemote, runGit } from "./git.js";
 import { isArchivedCodexSessionPath } from "./codex-archive.js";
 import { isCodexSessionContentForProject } from "./codex-session.js";
 import { scoreProjectManifest } from "./config.js";
-import { expandHome, normalizePath, readJson, toSlash, unique, writeJson } from "./utils.js";
+import { expandHome, normalizePath, readJson, toSlash, unique, writeFileAtomic, writeJson } from "./utils.js";
 
 export function ensureStoreRepo(storePath, remote) {
   mkdirSync(storePath, { recursive: true });
@@ -16,7 +16,7 @@ export function ensureStoreRepo(storePath, remote) {
   runGit(["config", "user.email", "agent-sync@example.invalid"], storePath);
   const gitignore = join(storePath, ".gitignore");
   if (!existsSync(gitignore)) {
-    writeFileSync(gitignore, DEFAULT_STORE_GITIGNORE);
+    writeFileAtomic(gitignore, DEFAULT_STORE_GITIGNORE);
   }
   if (remote) {
     const current = runGit(["remote", "get-url", "origin"], storePath, { allowFail: true });
@@ -130,7 +130,7 @@ export function pruneArchivedSidecarEntries(config, archiveInfo) {
     }
     if (removedBindings) {
       const content = keptLines.length ? `${keptLines.join("\n")}\n` : "";
-      writeFileSync(bindingsPath, content);
+      writeFileAtomic(bindingsPath, content);
     }
   }
 
@@ -211,7 +211,7 @@ export function pruneForeignProjectSidecarEntries(config) {
     }
     if (removedBindings) {
       const content = keptLines.length ? `${keptLines.join("\n")}\n` : "";
-      writeFileSync(bindingsPath, content);
+      writeFileAtomic(bindingsPath, content);
     }
   }
 
@@ -362,4 +362,8 @@ export function getProjectBundleDir(config) {
 
 export function getManifestPath(config) {
   return join(getProjectBundleDir(config), "manifest.json");
+}
+
+export function getProjectBundleStagePath(config) {
+  return toSlash(join("projects", config.projectId));
 }

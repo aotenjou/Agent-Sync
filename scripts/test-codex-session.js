@@ -7,8 +7,12 @@ import {
   adaptCodexSessionContent,
   cleanCodexTitle,
   extractCodexSessionMetadata,
+  applyCodexThreadMetadata,
   getCodexContentProjectMatch,
+  getCodexProjectMatch,
   isCodexSessionContentForProject,
+  getCodexThreadArchiveInfo,
+  loadCodexThreadIndex,
   loadCodexSessionTitles
 } from "../src/codex-session.js";
 
@@ -125,11 +129,25 @@ const statePath = join(codexHome, "state_5.sqlite");
 const sqlite = spawnSync("python3", ["-", statePath], {
   input: `import sqlite3, sys
 con = sqlite3.connect(sys.argv[1])
-con.execute("create table threads (id text primary key, title text not null, preview text not null, first_user_message text not null)")
-con.execute("insert into threads values (?, ?, ?, ?)", ("state-session", "State title", "Preview fallback", "First fallback"))
-con.execute("insert into threads values (?, ?, ?, ?)", ("preview-session", "", "Preview title", "First fallback"))
-con.execute("insert into threads values (?, ?, ?, ?)", ("first-session", "", "", "Traceback (most recent call last):\\\\nFile \\"bad.py\\"\\\\n修改一下报错"))
-con.execute("insert into threads values (?, ?, ?, ?)", ("state-wins-session", "State wins", "Index should not overwrite", "First fallback"))
+con.execute("""create table threads (
+    id text primary key,
+    rollout_path text not null,
+    title text not null,
+    preview text not null,
+    first_user_message text not null,
+    cwd text not null,
+    git_sha text,
+    git_branch text,
+    git_origin_url text,
+    archived integer not null default 0,
+    archived_at integer
+)""")
+con.execute("insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("state-session", "/tmp/state-session.jsonl", "State title", "Preview fallback", "First fallback", "/tmp/MokioAgent", "state-sha", "main", "https://github.com/Wood-Q/MokioAgent.git", 0, None))
+con.execute("insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("preview-session", "/tmp/preview-session.jsonl", "", "Preview title", "First fallback", "/tmp/MokioAgent", None, None, None, 0, None))
+con.execute("insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("first-session", "/tmp/first-session.jsonl", "", "", "Traceback (most recent call last):\\\\nFile \\"bad.py\\"\\\\n修改一下报错", "/tmp/MokioAgent", None, None, None, 0, None))
+con.execute("insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("state-wins-session", "/tmp/state-wins-session.jsonl", "State wins", "Index should not overwrite", "First fallback", "/tmp/MokioAgent", None, None, None, 0, None))
+con.execute("insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("foreign-state-session", "/tmp/foreign-state-session.jsonl", "Foreign state", "", "", "/tmp/Agent-Sync", "foreign-sha", "main", "https://github.com/Wood-Q/Agent-Sync.git", 0, None))
+con.execute("insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("archived-session", "/tmp/archived-session.jsonl", "Archived", "", "", "/tmp/MokioAgent", None, None, None, 1, 123))
 con.commit()
 `,
   encoding: "utf8"
@@ -145,6 +163,28 @@ if (sqlite.status === 0) {
   assert.equal(titles.get("first-session"), "修改一下报错");
   assert.equal(titles.get("state-wins-session"), "State wins");
   assert.equal(titles.get("index-session"), "Index title");
+
+  const threadIndex = loadCodexThreadIndex(codexHome);
+  const stateThread = threadIndex.byId.get("state-session");
+  assert.equal(stateThread.title, "State title");
+  assert.equal(stateThread.cwd, "/tmp/MokioAgent");
+  assert.equal(stateThread.gitSha, "state-sha");
+  assert.equal(stateThread.gitOriginUrl, "https://github.com/Wood-Q/MokioAgent.git");
+  const archiveInfo = getCodexThreadArchiveInfo(codexHome);
+  assert.equal(archiveInfo.status, "ok");
+  assert.deepEqual(archiveInfo.paths, ["/tmp/archived-session.jsonl"]);
+
+  const foreignStateMetadata = extractCodexSessionMetadata(makeSession({
+    name: "foreign-state",
+    root: targetRoot,
+    shell: "zsh",
+    cmd: "pwd"
+  }));
+  foreignStateMetadata.sessionId = "foreign-state-session";
+  applyCodexThreadMetadata(foreignStateMetadata, threadIndex.byId.get("foreign-state-session"));
+  const stateMatch = getCodexProjectMatch(foreignStateMetadata, mokioConfig);
+  assert.equal(stateMatch.matched, false);
+  assert.equal(stateMatch.reason, "codex:foreign-git");
 }
 
 const fallbackMetadata = extractCodexSessionMetadata([

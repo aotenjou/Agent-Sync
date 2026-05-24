@@ -28,6 +28,7 @@ import {
   ensureStoreRepo,
   findProjectBundle,
   getManifestPath,
+  getProjectBundleStagePath,
   pruneArchivedManifestEntries,
   pruneArchivedSidecarEntries,
   pruneForeignProjectSidecarEntries,
@@ -296,7 +297,7 @@ function pushCommand(gitRoot) {
   writeManifest(config, scan, gitContext);
   const bindingsAdded = writeBindings(config, scan.matches, gitContext, syncRunId);
 
-  runGit(["add", "."], config.storePath);
+  stageProjectBundle(config);
   const diff = runGit(["diff", "--cached", "--quiet"], config.storePath, { allowFail: true });
   if (diff.status === 0) {
     console.log(`agent-sync: no sidecar changes (${copied.length} matched sessions, ${pruned.removedFiles} archived removed, ${foreignPruned.removedFiles} foreign removed).`);
@@ -417,12 +418,16 @@ function commitStoreCleanup(config, archivedPruned, manifestPruned, foreignPrune
     return;
   }
 
-  runGit(["add", "."], config.storePath);
+  stageProjectBundle(config);
   const diff = runGit(["diff", "--cached", "--quiet"], config.storePath, { allowFail: true });
   if (diff.status !== 0) {
     runGit(["commit", "-m", `prune ${config.projectName} sidecar sessions`], config.storePath);
     console.log("agent-sync: committed sidecar cleanup locally; run push to publish it.");
   }
+}
+
+function stageProjectBundle(config) {
+  runGit(["add", "--", ".gitignore", getProjectBundleStagePath(config)], config.storePath);
 }
 
 function doctorCommand(gitRoot) {

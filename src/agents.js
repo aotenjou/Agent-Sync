@@ -1,12 +1,14 @@
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { getCodexArchiveInfo, isArchivedCodexSessionPath, summarizeCodexArchiveInfo } from "./codex-archive.js";
 import { getProjectRemote, normalizeRemoteUrl } from "./git.js";
 import {
+  createCodexThreadMetadata,
   extractCodexSessionMetadata,
   getCodexProjectMatch,
-  loadCodexSessionTitles,
+  loadCodexThreadIndex,
+  loadCodexSessionIndexTitles,
   resolveCodexHome
 } from "./codex-session.js";
 import {
@@ -18,35 +20,27 @@ import {
   restoreCachedScanEntry,
   writeScanCache
 } from "./scan-cache.js";
-import { normalizePath, safeRead, sha256, unique, walk } from "./utils.js";
+import { normalizePath, safeRead, sha256, walk } from "./utils.js";
 
 export function scanSessions(gitRoot, config, archiveInfo = null) {
   const projectRemote = normalizeRemoteUrl(getProjectRemote(gitRoot) || "");
   const codexRoot = getAgentRoot("codex");
   const codexArchiveInfo = archiveInfo || getCodexArchiveInfo(codexRoot, { gitRoot });
-  const codexTitles = loadCodexSessionTitles(codexRoot);
+  const codexThreadIndex = loadCodexThreadIndex(codexRoot);
+  const codexTitles = getCodexTitleMap(codexRoot, codexThreadIndex);
   const codexTitleSignature = getCodexTitleSourceSignature(codexRoot);
-  const needles = unique([
-    normalizePath(gitRoot),
-    normalizePath(gitRoot).replaceAll("/", "\\"),
-    projectRemote,
-    basename(gitRoot),
-    config.projectName
-  ].filter(Boolean));
 
-  const candidates = [
-    ...findAgentFiles("codex", codexRoot).filter((candidate) => !isArchivedCodexSessionPath(candidate.path, codexArchiveInfo)),
-    ...findAgentFiles("claude", getAgentRoot("claude"))
-  ];
+  const codexCandidates = findCodexCandidates(codexRoot, codexThreadIndex, codexArchiveInfo, config, projectRemote);
+  const candidates = codexCandidates;
 
-  const cache = prepareScanCache(gitRoot, config, projectRemote, needles, candidates, codexTitleSignature);
+  const cache = prepareScanCache(gitRoot, config, projectRemote, candidates, codexTitleSignature);
   const stats = {
     cached: 0,
     refreshed: 0,
     skipped: 0
   };
   const matches = candidates
-    .map((candidate) => scanCandidate(candidate, cache, stats, needles, config, projectRemote, codexTitles))
+    .map((candidate) => scanCandidate(candidate, cache, stats, config, projectRemote, codexTitles))
     .filter((match) => match)
     .sort((a, b) => a.agent.localeCompare(b.agent) || a.originalPath.localeCompare(b.originalPath));
   writeScanCache(gitRoot, cache);
@@ -65,7 +59,7 @@ export function scanSessions(gitRoot, config, archiveInfo = null) {
   };
 }
 
-function prepareScanCache(gitRoot, config, projectRemote, needles, candidates, codexTitleSignature) {
+function prepareScanCache(gitRoot, config, projectRemote, candidates, codexTitleSignature) {
   const cache = loadScanCache(gitRoot);
   const contextKey = JSON.stringify({
     projectId: config.projectId,
@@ -73,7 +67,6 @@ function prepareScanCache(gitRoot, config, projectRemote, needles, candidates, c
     projectRoot: normalizePath(gitRoot),
     projectName: config.projectName,
     projectRemote,
-    needles,
     codexTitleSignature
   });
   if (cache.contextKey !== contextKey) {
@@ -81,6 +74,62 @@ function prepareScanCache(gitRoot, config, projectRemote, needles, candidates, c
     cache.contextKey = contextKey;
   }
   return pruneScanCacheFiles(cache, candidates);
+}
+
+function findCodexCandidates(codexRoot, codexThreadIndex, codexArchiveInfo, config, projectRemote) {
+  const indexed = findCodexThreadCandidates(codexRoot, codexThreadIndex, codexArchiveInfo, config, projectRemote);
+  if (indexed.length || hasUsableCodexThreadIndex(codexThreadIndex)) {
+    return indexed;
+  }
+
+  return findAgentFiles("codex", codexRoot)
+    .filter((candidate) => !isArchivedCodexSessionPath(candidate.path, codexArchiveInfo));
+}
+
+function getCodexTitleMap(codexRoot, codexThreadIndex) {
+  const titles = new Map();
+  for (const thread of codexThreadIndex.threads) {
+    if (thread.id && thread.title) {
+      titles.set(thread.id, thread.title);
+    }
+  }
+  return loadCodexSessionIndexTitles(codexRoot, titles);
+}
+
+function hasUsableCodexThreadIndex(codexThreadIndex) {
+  return codexThreadIndex.threads.some((thread) => {
+    return thread.rolloutPath && (thread.cwd || thread.gitOriginUrl || thread.gitBranch || thread.gitSha);
+  });
+}
+
+function findCodexThreadCandidates(codexRoot, codexThreadIndex, codexArchiveInfo, config, projectRemote) {
+  const candidates = [];
+  const seen = new Set();
+  for (const thread of codexThreadIndex.threads) {
+    if (thread.archived || !thread.rolloutPath || seen.has(thread.rolloutPath)) {
+      continue;
+    }
+    if (isArchivedCodexSessionPath(thread.rolloutPath, codexArchiveInfo)) {
+      continue;
+    }
+    if (!existsSync(thread.rolloutPath)) {
+      continue;
+    }
+    const metadata = createCodexThreadMetadata(thread);
+    const projectMatch = getCodexProjectMatch(metadata, config, projectRemote);
+    if (!projectMatch.matched) {
+      continue;
+    }
+    seen.add(thread.rolloutPath);
+    candidates.push({
+      agent: "codex",
+      path: thread.rolloutPath,
+      root: normalizePath(codexRoot),
+      thread,
+      matchedBy: projectMatch.matchedBy
+    });
+  }
+  return candidates;
 }
 
 function getCodexTitleSourceSignature(codexRoot) {
@@ -105,7 +154,7 @@ function fileSignature(path) {
   }
 }
 
-function scanCandidate(candidate, cache, stats, needles, config, projectRemote, codexTitles) {
+function scanCandidate(candidate, cache, stats, config, projectRemote, codexTitles) {
   const stat = getCandidateStat(candidate);
   if (!stat) {
     return null;
@@ -122,13 +171,13 @@ function scanCandidate(candidate, cache, stats, needles, config, projectRemote, 
 
   stats.refreshed += 1;
   const content = safeRead(candidate.path);
-  const metadata = candidate.agent === "codex" ? extractCodexSessionMetadata(content) : null;
-  if (metadata?.sessionId && codexTitles.has(metadata.sessionId)) {
+  const metadata = candidate.agent === "codex" ? getCodexCandidateMetadata(candidate, content, codexTitles) : null;
+  if (metadata && !metadata.title && metadata.sessionId && codexTitles.has(metadata.sessionId)) {
     metadata.title = codexTitles.get(metadata.sessionId);
   }
   const matchedBy = candidate.agent === "codex"
-    ? matchCodexSession(metadata, content, needles, config, projectRemote)
-    : needles.filter((needle) => content.includes(needle));
+    ? matchCodexSession(metadata, candidate.matchedBy, config, projectRemote)
+    : [];
   const hash = sha256(content);
   const match = matchedBy.length
     ? {
@@ -146,8 +195,22 @@ function scanCandidate(candidate, cache, stats, needles, config, projectRemote, 
   return match;
 }
 
-function matchCodexSession(metadata, content, needles, config, projectRemote) {
-  const projectMatch = getCodexProjectMatch(metadata, content, config, projectRemote);
+function getCodexCandidateMetadata(candidate, content, codexTitles) {
+  if (!candidate.thread) {
+    return extractCodexSessionMetadata(content);
+  }
+  const metadata = createCodexThreadMetadata(candidate.thread);
+  if (!metadata.title) {
+    metadata.title = codexTitles.get(metadata.sessionId) || extractCodexSessionMetadata(content).title || null;
+  }
+  return metadata;
+}
+
+function matchCodexSession(metadata, preMatchedBy, config, projectRemote) {
+  if (preMatchedBy?.length) {
+    return preMatchedBy;
+  }
+  const projectMatch = getCodexProjectMatch(metadata, config, projectRemote);
   if (projectMatch.matched) {
     return projectMatch.matchedBy;
   }

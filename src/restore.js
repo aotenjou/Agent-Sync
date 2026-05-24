@@ -1,11 +1,11 @@
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentRoot } from "./agents.js";
 import { queryBindings } from "./bindings.js";
 import { parseSelector, formatSelector } from "./args.js";
 import { findProjectBundle } from "./store.js";
 import { adaptCodexSessionContent, getCodexContentProjectMatch } from "./codex-session.js";
-import { expandHome, readJson } from "./utils.js";
+import { expandHome, readJson, writeFileAtomic } from "./utils.js";
 
 export function restoreCommand(gitRoot, args, options, config) {
   const bundleId = args[0];
@@ -103,7 +103,7 @@ function restoreSessionFile(config, match, source, target, options) {
     return { adapted: false };
   }
 
-  writeFileSync(target, result.content);
+  writeFileAtomic(target, result.content);
   return result;
 }
 

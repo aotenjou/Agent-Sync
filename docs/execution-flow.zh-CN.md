@@ -68,10 +68,12 @@ git agent-sync scan
 
 扫描分两层：
 
-- 先枚举候选文件并读取文件 stat。
-- 再根据 `.agent-sync/scan-cache.json` 里的 mtime、size、hash 和上次匹配结果判断是否需要读全文。
+- 先读取 Codex `state_5.sqlite` 的 `threads` 表，按 `cwd` / `git_origin_url` / `git_branch` / `git_sha` 判断哪些线程属于当前项目。
+- 再通过 `threads.rollout_path` 定位对应 JSONL 文件，只对这些候选文件读取 stat、计算 hash、复制到 sidecar。
+- 如果 `state_5.sqlite` 不存在或没有可用项目字段，才回退到 JSONL 结构字段扫描。
+- 最后根据 `.agent-sync/scan-cache.json` 里的 mtime、size、hash 和上次匹配结果判断是否需要重新读取候选文件。
 
-如果文件没有变化，会直接复用上次的匹配结果；只有新增、mtime/size 变化、或者项目匹配上下文变化时，才会重新读取 session 全文、提取元数据并计算 hash。
+如果候选文件没有变化，会直接复用上次的匹配结果；只有新增、mtime/size 变化、或者 Codex state / 项目匹配上下文变化时，才会重新读取 session 内容。
 
 Codex 已归档识别也有独立缓存：
 
@@ -79,7 +81,20 @@ Codex 已归档识别也有独立缓存：
 - 当 `state_5.sqlite` 或 `archived_sessions/` 目录状态没有变化时，直接复用缓存。
 - 当归档状态变化时，才重新 walk `archived_sessions/`，并查询 `state_5.sqlite` 的 `threads` 表。
 
-Codex session 会优先读取 JSONL 里的原生结构字段，例如：
+Codex session 会优先读取 `state_5.sqlite` 里的线程字段，例如：
+
+- `threads.id`
+- `threads.rollout_path`
+- `threads.cwd`
+- `threads.git_origin_url`
+- `threads.git_branch`
+- `threads.git_sha`
+- `threads.archived` / `threads.archived_at`
+- `threads.title` / `threads.preview` / `threads.first_user_message`
+
+这些字段也是 Codex UI 能按项目分组和显示标题的主要来源。
+
+如果 state 不可用或缺少项目字段，才回退读取 JSONL 里的原生结构字段，例如：
 
 - `session_meta.payload.cwd`
 - `session_meta.payload.git.repository_url`
@@ -90,7 +105,7 @@ Codex session 会优先读取 JSONL 里的原生结构字段，例如：
 
 这些结构化字段也是项目归属的硬边界：
 
-- 如果 `repository_url` 指向当前业务仓库 remote，且 `cwd` / `workdir` 没有混入其他项目路径，则认为属于当前项目。
+- 如果 `git_origin_url` / `repository_url` 指向当前业务仓库 remote，且 `cwd` / `workdir` 没有混入其他项目路径，则认为属于当前项目。
 - 如果没有可用 remote，但 `cwd` / `workdir` 指向当前项目根或同名项目根，且没有混入其他项目路径，则认为属于当前项目。
 - 如果 session 已经明确记录了其他 Git remote、其他项目路径，或者同时跨多个项目 workdir，即使正文里提到当前项目名，也不会被当作当前项目 session。
 - 如果 session 完全缺少结构化项目身份，也不会只因为正文里出现项目名而被同步。这样会牺牲少量老格式兼容性，但可以保证不同项目的 session 不互相污染。
@@ -124,7 +139,8 @@ git agent-sync push
 同时写入两个关键索引：
 
 - `manifest.json`：当前项目最新可恢复 session 快照。
-- `bindings.jsonl`：历史 Git 上下文索引，用来按 latest / current / branch / commit 查询。
+- `bindings.jsonl`：append-only 历史 Git 上下文索引，用来按 latest / current / branch / commit 查询。
+- `bindings.idx.json`：从 `bindings.jsonl` 派生出来的可重建查询缓存，避免每次查询都重新解析完整 JSONL 历史。
 
 `bindings.jsonl` 会记录：
 

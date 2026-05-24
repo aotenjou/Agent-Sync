@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { inspectBindings, queryBindings } from "../src/bindings.js";
+import { inspectBindings, queryBindings, writeBindings } from "../src/bindings.js";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-sync-bindings-"));
 const config = { storePath: dir, projectId: "project" };
@@ -38,5 +38,33 @@ assert.equal(matches[0].bundleId, "codex-1");
 const latest = queryBindings(config, { type: "latest" }, process.cwd());
 assert.equal(latest.length, 1);
 assert.equal(latest[0].bundleId, "codex-1");
+
+const before = readFileSync(join(projectDir, "bindings.jsonl"), "utf8");
+const added = writeBindings(config, [{
+  agent: "codex",
+  bundleId: "codex-2",
+  sha256: "def456",
+  storeRelativePath: "projects/project/codex/codex-2.jsonl",
+  originalPath: "~/.codex/sessions/2.jsonl",
+  agentRelativePath: "2.jsonl",
+  metadata: {
+    sessionId: "session-2",
+    title: "second"
+  }
+}], {
+  branch: "main",
+  headCommit: "def456",
+  baseCommit: "def456",
+  dirty: false
+}, "run-2");
+
+assert.equal(added, 1);
+const after = readFileSync(join(projectDir, "bindings.jsonl"), "utf8");
+assert.equal(after.startsWith(before), true);
+assert.equal(existsSync(join(projectDir, "bindings.idx.json")), true);
+
+const indexedLatest = queryBindings(config, { type: "latest" }, process.cwd());
+assert.equal(indexedLatest.length, 1);
+assert.equal(indexedLatest[0].bundleId, "codex-2");
 
 console.log("bindings v2 test passed");

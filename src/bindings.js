@@ -1,7 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { BINDINGS_FILE } from "./constants.js";
+import { BINDINGS_FILE, BINDINGS_INDEX_FILE } from "./constants.js";
 import { getGitContext } from "./git.js";
+import { readJson, writeJson } from "./utils.js";
+
+const BINDINGS_INDEX_VERSION = 1;
 
 export function writeBindings(config, matches, gitContext, syncRunId = createSyncRunId(gitContext)) {
   const codexMatches = matches.filter((match) => match.agent === "codex");
@@ -49,8 +52,8 @@ export function writeBindings(config, matches, gitContext, syncRunId = createSyn
 
   const bindingsPath = getBindingsPath(config);
   mkdirSync(dirname(bindingsPath), { recursive: true });
-  const content = [...existing, ...additions].map((item) => JSON.stringify(item)).join("\n");
-  writeFileSync(bindingsPath, `${content}\n`);
+  appendFileSync(bindingsPath, `${additions.map((item) => JSON.stringify(item)).join("\n")}\n`);
+  writeBindingsIndex(config, [...existing, ...additions]);
   return additions.length;
 }
 
@@ -100,6 +103,10 @@ export function inspectBindings(config) {
 }
 
 function readBindings(config) {
+  const index = loadBindingsIndex(config);
+  if (index) {
+    return index.bindings;
+  }
   return inspectBindings(config).bindings;
 }
 
@@ -178,6 +185,67 @@ function bindingKey(binding) {
 
 export function getBindingsPath(config) {
   return join(config.storePath, "projects", config.projectId, BINDINGS_FILE);
+}
+
+export function getBindingsIndexPath(config) {
+  return join(config.storePath, "projects", config.projectId, BINDINGS_INDEX_FILE);
+}
+
+function loadBindingsIndex(config) {
+  const indexPath = getBindingsIndexPath(config);
+  if (!existsSync(indexPath)) {
+    return null;
+  }
+
+  try {
+    const index = readJson(indexPath);
+    if (index.version !== BINDINGS_INDEX_VERSION || !Array.isArray(index.bindings)) {
+      return null;
+    }
+    const source = bindingsSourceSignature(getBindingsPath(config));
+    if (!sameBindingsSource(index.source, source)) {
+      return null;
+    }
+    const bindings = index.bindings.map(normalizeBinding).filter(Boolean);
+    return {
+      bindings
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeBindingsIndex(config, bindings) {
+  const indexPath = getBindingsIndexPath(config);
+  mkdirSync(dirname(indexPath), { recursive: true });
+  const normalized = bindings.map(normalizeBinding).filter(Boolean);
+  writeJson(indexPath, {
+    version: BINDINGS_INDEX_VERSION,
+    updatedAt: new Date().toISOString(),
+    source: bindingsSourceSignature(getBindingsPath(config)),
+    total: normalized.length,
+    keys: normalized.map(bindingKey),
+    bindings: normalized
+  });
+}
+
+function bindingsSourceSignature(path) {
+  try {
+    const stat = statSync(path);
+    return {
+      exists: true,
+      size: stat.size
+    };
+  } catch {
+    return {
+      exists: false,
+      size: 0
+    };
+  }
+}
+
+function sameBindingsSource(left, right) {
+  return Boolean(left && right && left.exists === right.exists && left.size === right.size);
 }
 
 function normalizeBinding(binding) {

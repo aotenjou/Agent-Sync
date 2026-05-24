@@ -1,9 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { sha256, normalizePath, unique } from "./utils.js";
+import { expandHome, sha256, normalizePath, unique } from "./utils.js";
 import { normalizeRemoteUrl } from "./git.js";
+
+const codexStateCache = new Map();
 
 export function extractCodexSessionMetadata(content) {
   const metadata = {
@@ -57,6 +59,12 @@ export function extractCodexSessionMetadata(content) {
 export function loadCodexSessionTitles(codexRoot = join(homedir(), ".codex")) {
   const codexHome = resolveCodexHome(codexRoot);
   const titles = loadCodexStateTitles(codexHome);
+  loadCodexSessionIndexTitles(codexHome, titles);
+  return titles;
+}
+
+export function loadCodexSessionIndexTitles(codexRoot = join(homedir(), ".codex"), titles = new Map()) {
+  const codexHome = resolveCodexHome(codexRoot);
   const indexPath = join(codexHome, "session_index.jsonl");
   if (!existsSync(indexPath)) {
     return titles;
@@ -77,6 +85,86 @@ export function loadCodexSessionTitles(codexRoot = join(homedir(), ".codex")) {
     }
   }
   return titles;
+}
+
+export function loadCodexThreadIndex(codexRoot = join(homedir(), ".codex")) {
+  const codexHome = resolveCodexHome(codexRoot);
+  const snapshot = loadCodexStateSnapshot(codexHome);
+  const threads = snapshot.threads.map(normalizeCodexThread).filter((thread) => thread.id);
+  const byId = new Map();
+  const byRolloutPath = new Map();
+
+  for (const thread of threads) {
+    byId.set(thread.id, thread);
+    if (thread.rolloutPath) {
+      byRolloutPath.set(thread.rolloutPath, thread);
+    }
+  }
+
+  return {
+    codexHome,
+    stateStatus: snapshot.status,
+    threads,
+    byId,
+    byRolloutPath
+  };
+}
+
+export function getCodexThreadArchiveInfo(codexRoot = join(homedir(), ".codex")) {
+  const codexHome = resolveCodexHome(codexRoot);
+  const snapshot = loadCodexStateSnapshot(codexHome);
+  const paths = snapshot.threads
+    .map(normalizeCodexThread)
+    .filter((thread) => thread.archived && thread.rolloutPath)
+    .map((thread) => thread.rolloutPath);
+  return {
+    ok: snapshot.ok,
+    status: snapshot.status,
+    paths
+  };
+}
+
+export function applyCodexThreadMetadata(metadata, thread) {
+  if (!metadata || !thread) {
+    return metadata;
+  }
+
+  metadata.sessionId ||= thread.id || null;
+  metadata.title = thread.title || metadata.title || null;
+  metadata.codexThread = {
+    id: thread.id,
+    rolloutPath: thread.rolloutPath,
+    archived: thread.archived,
+    cwd: thread.cwd,
+    gitSha: thread.gitSha,
+    gitBranch: thread.gitBranch,
+    gitOriginUrl: thread.gitOriginUrl
+  };
+
+  const hasProjectOwnership = Boolean(thread.cwd || thread.gitOriginUrl || thread.gitSha || thread.gitBranch);
+  if (hasProjectOwnership) {
+    metadata.projectRoots = [];
+    metadata.workdirs = [];
+    metadata.gitContexts = [];
+    addMetadataPath(metadata.projectRoots, thread.cwd);
+    metadata.gitContexts.unshift({
+      branch: thread.gitBranch || null,
+      commit: thread.gitSha || null,
+      repositoryUrl: thread.gitOriginUrl || null,
+      cwd: thread.cwd || null
+    });
+  }
+  return metadata;
+}
+
+export function createCodexThreadMetadata(thread) {
+  return applyCodexThreadMetadata({
+    sessionId: null,
+    title: null,
+    projectRoots: [],
+    workdirs: [],
+    gitContexts: []
+  }, thread);
 }
 
 export function cleanCodexTitle(value) {
@@ -101,49 +189,133 @@ export function resolveCodexHome(codexRoot = join(homedir(), ".codex")) {
 
 function loadCodexStateTitles(codexHome) {
   const titles = new Map();
-  const statePath = join(codexHome, "state_5.sqlite");
-  if (!existsSync(statePath)) {
-    return titles;
-  }
-
-  const result = spawnSync("python3", ["-", statePath], {
-    input: `import json, sqlite3, sys
-path = sys.argv[1]
-try:
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    cur = con.cursor()
-    cols = {row[1] for row in cur.execute("pragma table_info(threads)")}
-    wanted = [col for col in ("id", "title", "preview", "first_user_message") if col in cols]
-    if "id" in wanted:
-        query = "select " + ", ".join(wanted) + " from threads"
-        for row in cur.execute(query):
-            print(json.dumps(dict(zip(wanted, row)), ensure_ascii=False))
-except Exception:
-    pass
-`,
-    encoding: "utf8"
-  });
-  if (result.status !== 0 || !result.stdout) {
-    return titles;
-  }
-  for (const line of result.stdout.split(/\r?\n/)) {
-    if (!line.trim()) {
-      continue;
-    }
-    try {
-      const item = JSON.parse(line);
-      const title = chooseFirstTitle([item.title, item.preview, item.first_user_message]);
-      if (item.id && title) {
-        titles.set(item.id, title);
-      }
-    } catch {
-      // Ignore partial SQLite title rows.
+  for (const item of loadCodexStateSnapshot(codexHome).threads) {
+    const title = chooseFirstTitle([item.title, item.preview, item.first_user_message]);
+    if (item.id && title) {
+      titles.set(item.id, title);
     }
   }
   return titles;
 }
 
-export function getCodexProjectMatch(metadata, content, config, projectRemote = "") {
+function loadCodexStateSnapshot(codexHome) {
+  const statePath = join(codexHome, "state_5.sqlite");
+  if (!existsSync(statePath)) {
+    return { ok: false, status: "missing", threads: [] };
+  }
+
+  const cacheKey = normalizePath(statePath);
+  const signature = getCodexStateSignature(statePath);
+  const cached = codexStateCache.get(cacheKey);
+  if (cached && sameCodexStateSignature(cached.signature, signature)) {
+    return cached.snapshot;
+  }
+
+  const script = `import json, sqlite3, sys
+path = sys.argv[1]
+try:
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    cur = con.cursor()
+    cols = {row[1] for row in cur.execute("pragma table_info(threads)")}
+    wanted = [col for col in (
+        "id",
+        "title",
+        "preview",
+        "first_user_message",
+        "cwd",
+        "git_sha",
+        "git_branch",
+        "git_origin_url",
+        "rollout_path",
+        "archived",
+        "archived_at"
+    ) if col in cols]
+    if "id" in wanted:
+        query = "select " + ", ".join(wanted) + " from threads"
+        for row in cur.execute(query):
+            print(json.dumps(dict(zip(wanted, row)), ensure_ascii=False))
+except Exception:
+    raise
+`;
+  const result = runPythonSqlite(script, statePath);
+  if (result.error) {
+    const snapshot = { ok: false, status: `unavailable (${result.error.message})`, threads: [] };
+    codexStateCache.set(cacheKey, { signature, snapshot });
+    return snapshot;
+  }
+  if (result.status !== 0) {
+    const message = (result.stderr || result.stdout || "").trim();
+    const snapshot = { ok: false, status: `unavailable (${message || `exit ${result.status}`})`, threads: [] };
+    codexStateCache.set(cacheKey, { signature, snapshot });
+    return snapshot;
+  }
+
+  const threads = [];
+  for (const line of result.stdout.split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      threads.push(JSON.parse(line));
+    } catch {
+      // Ignore partial SQLite rows.
+    }
+  }
+  const snapshot = { ok: true, status: "ok", threads };
+  codexStateCache.set(cacheKey, { signature, snapshot });
+  return snapshot;
+}
+
+function runPythonSqlite(script, statePath) {
+  for (const command of ["python3", "python"]) {
+    const result = spawnSync(command, ["-", statePath], {
+      input: script,
+      encoding: "utf8"
+    });
+    if (!result.error && result.status === 0) {
+      return result;
+    }
+  }
+  return { stdout: "", status: 1, error: new Error("python-unavailable") };
+}
+
+function getCodexStateSignature(statePath) {
+  try {
+    const stat = existsSync(statePath) ? readStateStat(statePath) : null;
+    return stat || { exists: false };
+  } catch {
+    return { exists: false };
+  }
+}
+
+function readStateStat(statePath) {
+  const stat = statSync(statePath);
+  return {
+    exists: true,
+    size: stat.size,
+    mtimeMs: stat.mtimeMs
+  };
+}
+
+function sameCodexStateSignature(a, b) {
+  return Boolean(a && b && a.exists === b.exists && a.size === b.size && a.mtimeMs === b.mtimeMs);
+}
+
+function normalizeCodexThread(item) {
+  const archivedAt = Number(item.archived_at || 0);
+  return {
+    id: item.id || null,
+    title: chooseFirstTitle([item.title, item.preview, item.first_user_message]),
+    cwd: normalizeSessionPathOrNull(item.cwd),
+    gitSha: item.git_sha || null,
+    gitBranch: item.git_branch || null,
+    gitOriginUrl: item.git_origin_url || null,
+    rolloutPath: normalizeOptionalPath(item.rollout_path),
+    archived: Number(item.archived || 0) === 1 || archivedAt > 0
+  };
+}
+
+export function getCodexProjectMatch(metadata, config, projectRemote = getConfigRemoteIdentity(config)) {
   const remoteMatch = matchCodexRemote(metadata, projectRemote);
   if (hasKnownDifferentRemote(metadata, projectRemote)) {
     return { matched: false, reason: "codex:foreign-git" };
@@ -174,15 +346,11 @@ export function getCodexProjectMatch(metadata, content, config, projectRemote = 
 
 export function getCodexContentProjectMatch(content, config, projectRemote = getConfigRemoteIdentity(config)) {
   const metadata = extractCodexSessionMetadata(content);
-  return getCodexProjectMatch(metadata, content, config, projectRemote);
+  return getCodexProjectMatch(metadata, config, projectRemote);
 }
 
 export function isCodexSessionContentForProject(content, config, projectRemote = getConfigRemoteIdentity(config)) {
   return getCodexContentProjectMatch(content, config, projectRemote).matched;
-}
-
-export function isCodexSessionForProject(metadata, config) {
-  return getCodexProjectMatch(metadata, "", config, getConfigRemoteIdentity(config)).matched;
 }
 
 function getConfigRemoteIdentity(config) {
@@ -252,6 +420,16 @@ function getMessageTitle(payload) {
   }
   const text = getMessageText(payload);
   return cleanTitle(text);
+}
+
+function addMetadataPath(paths, value) {
+  if (!Array.isArray(paths) || !value) {
+    return;
+  }
+  const normalized = normalizeSessionPathReference(value);
+  if (!paths.includes(normalized)) {
+    paths.push(normalized);
+  }
 }
 
 function chooseFirstTitle(values) {
@@ -749,6 +927,20 @@ function addPath(paths, value) {
 
 export function normalizeSessionPathReference(value) {
   return trimTrailingPathSeparators(String(value).replaceAll("\\", "/"));
+}
+
+function normalizeSessionPathOrNull(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+  return normalizeSessionPathReference(value);
+}
+
+function normalizeOptionalPath(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+  return normalizePath(expandHome(value));
 }
 
 function isSourcePlatformPath(value, sourcePlatform) {

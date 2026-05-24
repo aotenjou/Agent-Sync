@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { CONFIG_FILE, DEFAULT_AGENT_DIR } from "./constants.js";
 import { getProjectIdentity, normalizeRemoteUrl } from "./git.js";
-import { normalizePath, readJson, sha256, unique, writeJson } from "./utils.js";
+import { normalizePath, readJson, sha256, unique, writeFileAtomic, writeJson } from "./utils.js";
 
 export function readConfig(gitRoot) {
   const path = join(gitRoot, CONFIG_FILE);
@@ -36,7 +36,7 @@ export function writeGitignoreEntry(gitRoot, entry) {
   const line = `${entry}/`;
   const existing = existsSync(gitignore) ? readFileSync(gitignore, "utf8") : "";
   if (!existing.split(/\r?\n/).includes(line)) {
-    writeFileSync(gitignore, `${existing}${existing.endsWith("\n") || existing.length === 0 ? "" : "\n"}${line}\n`);
+    writeFileAtomic(gitignore, `${existing}${existing.endsWith("\n") || existing.length === 0 ? "" : "\n"}${line}\n`);
   }
 }
 

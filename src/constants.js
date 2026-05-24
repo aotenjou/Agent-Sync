@@ -8,4 +8,5 @@ export const DEFAULT_AGENT_DIR = ".agent-sync-store";
 export const DEFAULT_STORE_GITIGNORE = "node_modules/\n.DS_Store\nThumbs.db\n";
 export const DEFAULT_STORE_BRANCH = "main";
 export const BINDINGS_FILE = "bindings.jsonl";
+export const BINDINGS_INDEX_FILE = "bindings.idx.json";
 export const SUPPORTED_AGENTS = ["codex", "claude"];

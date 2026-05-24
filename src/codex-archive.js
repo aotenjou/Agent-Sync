@@ -1,7 +1,7 @@
 import { existsSync, statSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { basename, dirname, join } from "node:path";
 import { ARCHIVE_CACHE_FILE } from "./constants.js";
+import { getCodexThreadArchiveInfo } from "./codex-session.js";
 import { expandHome, normalizePath, readJson, shrinkHome, walk, writeJson } from "./utils.js";
 
 const CACHE_VERSION = 1;
@@ -36,12 +36,12 @@ export function getCodexArchiveInfo(codexRoot, options = {}) {
     sources.push(`dir:${files.length}`);
   }
 
-  const sqlite = readArchivedRolloutPaths(statePath);
-  if (sqlite.ok) {
-    for (const path of sqlite.paths) {
+  const state = getCodexThreadArchiveInfo(codexRoot);
+  if (state.ok) {
+    for (const path of state.paths) {
       addArchivedPath(archivedPaths, path);
     }
-    sources.push(`state:${sqlite.paths.length}`);
+    sources.push(`state:${state.paths.length}`);
   }
 
   const info = {
@@ -50,7 +50,7 @@ export function getCodexArchiveInfo(codexRoot, options = {}) {
     archivedSessionsDir: normalizePath(archivedSessionsDir),
     archivedPaths,
     sourceSummary: sources.join(",") || "none",
-    stateStatus: sqlite.status,
+    stateStatus: state.status,
     cacheStatus: cachePath ? "miss" : "off"
   };
 
@@ -104,35 +104,6 @@ function resolveCodexHome(codexRoot) {
     return parent;
   }
   return normalized;
-}
-
-function readArchivedRolloutPaths(statePath) {
-  if (!existsSync(statePath)) {
-    return { ok: false, status: "missing", paths: [] };
-  }
-
-  const result = spawnSync(
-    "sqlite3",
-    ["-noheader", statePath, "SELECT rollout_path FROM threads WHERE archived = 1 OR archived_at IS NOT NULL;"],
-    { encoding: "utf8" }
-  );
-
-  if (result.error) {
-    return { ok: false, status: `unavailable (${result.error.message})`, paths: [] };
-  }
-  if (result.status !== 0) {
-    const message = (result.stderr || result.stdout || "").trim();
-    return { ok: false, status: `unavailable (${message || `exit ${result.status}`})`, paths: [] };
-  }
-
-  return {
-    ok: true,
-    status: "ok",
-    paths: result.stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-  };
 }
 
 function readArchiveCache(cachePath, signature) {

@@ -1,11 +1,17 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 export function writeJson(path, value) {
+  writeFileAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+export function writeFileAtomic(path, content, options = undefined) {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+  const tempPath = join(dirname(path), `.${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}.tmp`);
+  writeFileSync(tempPath, content, options);
+  renameSync(tempPath, path);
 }
 
 export function readJson(path) {
