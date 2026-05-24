@@ -113,49 +113,6 @@ export function isCodexSessionForProject(metadata, config) {
   return getCodexProjectMatch(metadata, "", config, getConfigRemoteIdentity(config)).matched;
 }
 
-export function getCodexBindingContext(metadata, fallbackGitContext, config = null, match = null) {
-  const gitContexts = selectBindingGitContexts(metadata, config, match);
-  const commits = gitContexts.map((item) => item.commit).filter(Boolean);
-  const latestGit = [...gitContexts].reverse().find((item) => item.commit || item.branch || item.repositoryUrl);
-  return {
-    branch: latestGit?.branch ?? fallbackGitContext.branch,
-    headCommit: commits.at(-1) || fallbackGitContext.headCommit,
-    baseCommit: commits[0] || fallbackGitContext.baseCommit,
-    dirty: fallbackGitContext.dirty
-  };
-}
-
-function selectBindingGitContexts(metadata, config, match) {
-  const gitContexts = metadata.gitContexts || [];
-  if (!gitContexts.length) {
-    return [];
-  }
-
-  const projectRemote = getConfigRemoteIdentity(config);
-  const remoteMatches = projectRemote
-    ? gitContexts.filter((item) => normalizeRemoteUrl(item.repositoryUrl || "") === projectRemote)
-    : [];
-  if (remoteMatches.length) {
-    return remoteMatches;
-  }
-  if (projectRemote && gitContexts.some((item) => item.repositoryUrl)) {
-    return [];
-  }
-
-  const pathMatches = config
-    ? gitContexts.filter((item) => item.cwd && isProjectPathReference(item.cwd, config))
-    : [];
-  if (pathMatches.length) {
-    return pathMatches;
-  }
-
-  const matchedBy = match?.matchedBy || [];
-  const matchedThroughStructuredField = matchedBy.some((value) => {
-    return value === "codex:cwd" || value.startsWith("git:") || (projectRemote && value === projectRemote);
-  });
-  return matchedThroughStructuredField ? gitContexts : [];
-}
-
 function getConfigRemoteIdentity(config) {
   return config?.projectIdentity?.startsWith("git:") ? config.projectIdentity.slice("git:".length) : "";
 }

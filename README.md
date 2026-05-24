@@ -8,15 +8,14 @@ It solves one specific problem: source code can move with `git clone`, but local
 
 - Scans Codex sessions in `~/.codex/sessions/**/*.jsonl`
 - Skips archived Codex sessions by default: `~/.codex/archived_sessions/**/*.jsonl` and threads marked `archived = 1` in `state_5.sqlite`
-- Scans Claude Code sessions in `~/.claude/projects/**/*.jsonl`
 - Uses local mtime/size/hash caches so unchanged session files are not reread on every scan
 - Matches Codex sessions only through native JSONL metadata; sessions missing project `git/cwd/workdir` metadata or recording another Git remote / project path are rejected
 - Copies matched sessions into a sidecar Git repo at `.agent-sync-store/`
 - Pushes and pulls that sidecar repo without adding sessions to your project commits
-- Restores pulled sessions back into the local Codex or Claude session directory
+- Restores pulled sessions back into the local Codex session directory
 - Adapts restored Codex sessions across operating systems without changing the sidecar source
-- Records lightweight Git context bindings for each pushed session
-- Lists or restores sessions by the current Git state, branch, or commit
+- Records the project `HEAD` commit for each pushed Codex snapshot
+- Browses session history with `log`, inspects one snapshot with `show`, and restores by latest/current/branch/commit
 - Uses a cross-platform project identity based on the project Git remote when available
 - Falls back to legacy path-based bundles so older stores still restore
 
@@ -61,8 +60,8 @@ git clone git@github.com:you/your-project.git
 cd your-project
 git agent-sync init --remote git@github.com:you/agent-session-store.git
 git agent-sync pull
-git agent-sync list --current
-git agent-sync restore --all
+git agent-sync log --latest
+git agent-sync restore --latest 1
 ```
 
 You can also pass the session-store URL as the first positional argument:
@@ -90,14 +89,20 @@ git push
 ```bash
 git agent-sync init [--remote <url>|<url>] [--store <path>]
 git agent-sync status [--json]
-git agent-sync list --current [--json]
-git agent-sync list --branch <name> [--json]
-git agent-sync list --commit <sha> [--json]
+git agent-sync log --latest [--json]
+git agent-sync log --current [--json]
+git agent-sync log --branch <name> [--json]
+git agent-sync log --commit <sha> [--json]
+git agent-sync show <bundle-id>
+git agent-sync show --latest 1
+git agent-sync show --current 1
 git agent-sync scan [--json]
 git agent-sync push
 git agent-sync pull
 git agent-sync restore <bundle-id>
 git agent-sync restore --all
+git agent-sync restore --latest
+git agent-sync restore --latest 1
 git agent-sync restore --current
 git agent-sync restore --current 1
 git agent-sync restore --branch <name>
@@ -146,14 +151,16 @@ Each `push` writes a lightweight historical index at:
       bindings.jsonl
 ```
 
-`manifest.json` remains the latest snapshot. `bindings.jsonl` is used for historical lookup and records the session bundle, branch, `HEAD` commit, `baseCommit`, and whether the project worktree was dirty when the session was synced.
+`manifest.json` remains the latest snapshot. `bindings.jsonl` is used for Git-style history lookup and records the Codex snapshot bundle, sync run, project branch, project `HEAD` commit, and whether the project worktree was dirty when the snapshot was synced.
 
-For Codex sessions, new bindings prefer the Git context that Codex already saved inside the session JSONL. Agent-Sync reads `session_meta.payload.git.commit_hash`, `session_meta.payload.git.branch`, and `session_meta.payload.git.repository_url`, then falls back to the business repo's Git state at push time when those fields are missing or do not belong to the current project. `dirty` is still taken from the business repo at push time because Codex sessions do not provide a reliable per-session dirty flag.
+The primary anchor is the business repo commit at `git agent-sync push` time. Codex session-internal `session_meta.payload.git.commit_hash` is only used for project ownership checks, not as the restore lookup commit.
 
 ```bash
-git agent-sync list --current
-git agent-sync list --branch main
-git agent-sync list --commit 4f7c2a1
+git agent-sync log --latest
+git agent-sync log --current
+git agent-sync log --branch main
+git agent-sync log --commit 4f7c2a1
+git agent-sync show --latest 1
 ```
 
 Human-readable output shows the conversation title first and numbers each result. `--json` keeps returning the raw machine-readable bindings.
@@ -161,6 +168,7 @@ Human-readable output shows the conversation title first and numbers each result
 Restore can use the same selectors:
 
 ```bash
+git agent-sync restore --latest
 git agent-sync restore --current
 git agent-sync restore --branch main
 git agent-sync restore --commit 4f7c2a1
@@ -169,12 +177,13 @@ git agent-sync restore --commit 4f7c2a1
 When a selector matches multiple sessions, append the displayed number to restore only one:
 
 ```bash
+git agent-sync restore --latest 1
 git agent-sync restore --current 1
 git agent-sync restore --branch main 2
 git agent-sync restore --commit 4f7c2a1 3
 ```
 
-Commit matching is the primary lookup path. `--current` first matches the current `HEAD` commit, then falls back to the current branch if no commit binding exists. Branches are historical labels from sync time; they do not follow mutable branch pointers. Detached HEAD syncs store `branch: null` and remain queryable by commit.
+`--latest` matches the most recent sidecar sync batch. `--current` matches the current project `HEAD` commit, with branch fallback only when no commit binding exists. `--commit` matches the project commit recorded during sync. Branches are historical labels from sync time; they do not follow mutable branch pointers. Detached HEAD syncs store `branch: null` and remain queryable by commit.
 
 ## Cross-Platform Restore Adaptation
 
@@ -294,7 +303,7 @@ The suite includes:
 - `npm run test:codex-session`: Windows / macOS / Linux style Codex path adaptation.
 - `npm run test:scan-cache`: unchanged session files are reused from the local scan cache.
 - `npm run test:archive-cache`: archived Codex session sets are reused until archive state changes.
-- `npm run test:e2e`: two temporary project clones plus a bare sidecar remote, covering `push`, `pull`, `list --current`, `list --branch`, `list --commit`, `restore`, `doctor`, and verification that `.agent-sync-store` is not tracked by the business repo.
+- `npm run test:e2e`: two temporary project clones plus a bare sidecar remote, covering `push`, `pull`, `log --current`, `log --branch`, `log --commit`, `restore`, `doctor`, and verification that `.agent-sync-store` is not tracked by the business repo.
 
 ## Troubleshooting
 

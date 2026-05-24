@@ -4,7 +4,7 @@
 
 它解决一个很具体的问题：业务代码可以通过 `git clone` 到另一台机器，但 Codex、Claude Code 这类 code agent 的本地会话通常不会跟过去。
 
-这个工具会扫描本机的 Codex / Claude Code 会话，找出和当前 Git 项目相关的文件，然后同步到一个独立的私有 Git 仓库里。
+这个工具会优先扫描本机的 Codex 会话，找出和当前 Git 项目相关的文件，然后同步到一个独立的私有 Git 仓库里。
 
 > Git for your AI coding sessions.
 
@@ -13,15 +13,14 @@
 - 作为 Git 子命令使用：`git agent-sync ...`
 - 扫描 Codex 会话：`~/.codex/sessions/**/*.jsonl`
 - 默认跳过 Codex 已归档会话：`~/.codex/archived_sessions/**/*.jsonl`，以及 `state_5.sqlite` 里 `threads.archived = 1` 的线程
-- 扫描 Claude Code 会话：`~/.claude/projects/**/*.jsonl`
 - 使用本地 mtime/size/hash 缓存，未变化的 session 文件不会每次都重新读全文
 - Codex 会话只根据 JSONL 原生元数据匹配项目；缺少 `git/cwd/workdir` 项目元数据，或已记录其他 Git remote / 项目路径时，会被拒绝同步
 - 把匹配到的会话复制到 sidecar Git 仓库 `.agent-sync-store/`
 - 支持把 sidecar 仓库推送到专门的私有远程仓库
-- 支持在另一台机器拉取 sidecar 仓库并恢复会话
+- 支持在另一台机器拉取 sidecar 仓库并恢复 Codex 会话
 - 支持恢复时对跨平台 Codex session 做轻量适配，不修改 sidecar 原文件
-- 为每次同步的 session 记录轻量 Git 上下文绑定
-- 支持按当前 Git 状态、branch、commit 查询或恢复 session
+- 为每次同步的 Codex 快照记录业务项目 `HEAD` commit
+- 使用 `log` 浏览会话历史，使用 `show` 查看单条快照，并按 latest/current/branch/commit 恢复
 - 支持 `pre-push` hook，在业务仓库 `git push` 前自动同步会话
 - 使用业务仓库 remote 生成跨平台稳定的 `projectId`
 - 兼容旧版本按本地绝对路径生成的历史 bundle
@@ -72,8 +71,8 @@ git clone git@github.com:yourname/your-project.git
 cd your-project
 git agent-sync init --remote git@github.com:yourname/agent-session-store.git
 git agent-sync pull
-git agent-sync list --current
-git agent-sync restore --all
+git agent-sync log --latest
+git agent-sync restore --latest 1
 ```
 
 `init` 也支持把远程地址作为第一个位置参数：
@@ -113,14 +112,20 @@ git-agent-sync push
 ```bash
 git agent-sync init [--remote <url>|<url>] [--store <path>]
 git agent-sync status [--json]
-git agent-sync list --current [--json]
-git agent-sync list --branch <name> [--json]
-git agent-sync list --commit <sha> [--json]
+git agent-sync log --latest [--json]
+git agent-sync log --current [--json]
+git agent-sync log --branch <name> [--json]
+git agent-sync log --commit <sha> [--json]
+git agent-sync show <bundle-id>
+git agent-sync show --latest 1
+git agent-sync show --current 1
 git agent-sync scan [--json]
 git agent-sync push
 git agent-sync pull
 git agent-sync restore <bundle-id>
 git agent-sync restore --all
+git agent-sync restore --latest
+git agent-sync restore --latest 1
 git agent-sync restore --current
 git agent-sync restore --current 1
 git agent-sync restore --branch <name>
@@ -169,16 +174,18 @@ git agent-sync doctor
       bindings.jsonl
 ```
 
-`manifest.json` 仍然表示最新快照。`bindings.jsonl` 用于历史查询，会记录 session bundle、同步时的 branch、`HEAD` commit、`baseCommit`，以及业务工作区当时是否 dirty。
+`manifest.json` 仍然表示最新快照。`bindings.jsonl` 用于 Git 风格历史查询，会记录 Codex 快照 bundle、同步批次、业务项目 branch、业务项目 `HEAD` commit，以及业务工作区当时是否 dirty。
 
-对于 Codex session，新写入的 binding 会优先使用 Codex 已经保存在 JSONL 里的 Git 上下文。Agent-Sync 会读取 `session_meta.payload.git.commit_hash`、`session_meta.payload.git.branch` 和 `session_meta.payload.git.repository_url`；当这些字段缺失，或者它们不属于当前业务项目时，再回退到 `push` 时业务仓库的 Git 状态。`dirty` 仍然取 `push` 时业务仓库的状态，因为 Codex session 里没有可靠的 per-session dirty 字段。
+主要锚点是执行 `git agent-sync push` 时的业务仓库 commit。Codex session 内部的 `session_meta.payload.git.commit_hash` 只用于判断项目归属，不再作为恢复查询的主 commit。
 
 为了避免不同项目的对话互相污染，Codex session 只使用结构化项目身份判断归属：`repository_url` 必须匹配当前业务仓库 remote，且 `cwd` / `workdir` 不能混入其他项目路径。已经明确属于其他 Git 仓库、其他项目路径、同一个 session 同时跨多个项目 workdir，或者完全缺少结构化项目身份的记录，即使正文里提到当前项目名，也不会被 `push`、`pull` 清理后的 manifest、或者 `restore` 接受。
 
 ```bash
-git agent-sync list --current
-git agent-sync list --branch main
-git agent-sync list --commit 4f7c2a1
+git agent-sync log --latest
+git agent-sync log --current
+git agent-sync log --branch main
+git agent-sync log --commit 4f7c2a1
+git agent-sync show --latest 1
 ```
 
 普通输出会把会话标题放在最前面，并为每条结果加上编号，方便从结果里挑一个恢复。`--json` 会保留机器可读的原始 binding 列表。
@@ -186,6 +193,7 @@ git agent-sync list --commit 4f7c2a1
 恢复命令也支持相同 selector：
 
 ```bash
+git agent-sync restore --latest
 git agent-sync restore --current
 git agent-sync restore --branch main
 git agent-sync restore --commit 4f7c2a1
@@ -194,12 +202,13 @@ git agent-sync restore --commit 4f7c2a1
 如果 selector 匹配多条 session，可以追加编号只恢复其中一条：
 
 ```bash
+git agent-sync restore --latest 1
 git agent-sync restore --current 1
 git agent-sync restore --branch main 2
 git agent-sync restore --commit 4f7c2a1 3
 ```
 
-commit 是主要查询锚点。`--current` 会先匹配当前 `HEAD` commit；如果没有结果，再回退匹配当前 branch。branch 只是同步发生时的历史标签，不代表会跟随可变分支指针。detached HEAD 同步时会记录 `branch: null`，仍然可以通过 commit 查询。
+`--latest` 匹配最近一次 sidecar 同步批次。`--current` 匹配当前业务项目 `HEAD` commit；如果没有 commit binding，再回退匹配当前 branch。`--commit` 匹配同步时记录的业务项目 commit。branch 只是同步发生时的历史标签，不代表会跟随可变分支指针。detached HEAD 同步时会记录 `branch: null`，仍然可以通过 commit 查询。
 
 ## 跨平台恢复适配
 
@@ -317,7 +326,7 @@ npm run test
 - `npm run test:codex-session`：Windows / macOS / Linux 风格 Codex 路径适配
 - `npm run test:scan-cache`：验证未变化 session 文件会复用本地扫描缓存
 - `npm run test:archive-cache`：验证 Codex 归档集合会复用缓存，并在归档状态变化时刷新
-- `npm run test:e2e`：用两个临时业务 clone 和一个 bare sidecar remote 覆盖 `push`、`pull`、`list --current`、`list --branch`、`list --commit`、`restore`、`doctor`，并验证 `.agent-sync-store` 不会被业务仓库跟踪
+- `npm run test:e2e`：用两个临时业务 clone 和一个 bare sidecar remote 覆盖 `push`、`pull`、`log --current`、`log --branch`、`log --commit`、`restore`、`doctor`，并验证 `.agent-sync-store` 不会被业务仓库跟踪
 
 ## 排查问题
 

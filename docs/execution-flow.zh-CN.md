@@ -1,6 +1,6 @@
 # 工具执行链路
 
-Agent-Sync 的核心链路可以理解为：业务仓库只负责代码，sidecar 仓库只负责 agent 会话。两者通过项目 identity、Git 上下文和 session 元数据关联，但不会把会话文件写进业务仓库历史。
+Agent-Sync 的核心链路可以理解为：业务仓库只负责代码，sidecar 仓库只负责 Codex 会话。两者通过项目 identity、业务项目 commit 和 session 元数据关联，但不会把会话文件写进业务仓库历史。
 
 ```text
 业务仓库
@@ -11,7 +11,7 @@ Agent-Sync 的核心链路可以理解为：业务仓库只负责代码，sideca
   |
   | 2. scan/status
   v
-本机 Codex / Claude session
+本机 Codex session
   |
   | 3. push
   v
@@ -20,15 +20,14 @@ Agent-Sync 的核心链路可以理解为：业务仓库只负责代码，sideca
     manifest.json
     bindings.jsonl
     codex/*.jsonl
-    claude/*.jsonl
   |
   | 4. sidecar git push/pull
   v
 私有 session store 远程仓库
   |
-  | 5. pull + list/restore
+  | 5. pull + log/restore
   v
-另一台机器的 Codex / Claude session 目录
+另一台机器的 Codex session 目录
 ```
 
 ## 1. 初始化：建立项目身份和 sidecar store
@@ -63,10 +62,9 @@ git agent-sync status
 git agent-sync scan
 ```
 
-工具会扫描：
+工具当前优先扫描：
 
 - Codex：`~/.codex/sessions/**/*.jsonl`
-- Claude Code：`~/.claude/projects/**/*.jsonl`
 
 扫描分两层：
 
@@ -97,7 +95,7 @@ Codex session 会优先读取 JSONL 里的原生结构字段，例如：
 - 如果 session 已经明确记录了其他 Git remote、其他项目路径，或者同时跨多个项目 workdir，即使正文里提到当前项目名，也不会被当作当前项目 session。
 - 如果 session 完全缺少结构化项目身份，也不会只因为正文里出现项目名而被同步。这样会牺牲少量老格式兼容性，但可以保证不同项目的 session 不互相污染。
 
-Claude session 暂时继续使用路径、remote、仓库名等文本匹配逻辑。
+Claude Code 不参与当前 Git-aligned `log/show/restore` 主流程。
 
 扫描结果会写入：
 
@@ -126,7 +124,7 @@ git agent-sync push
 同时写入两个关键索引：
 
 - `manifest.json`：当前项目最新可恢复 session 快照。
-- `bindings.jsonl`：历史 Git 上下文索引，用来按 current / branch / commit 查询。
+- `bindings.jsonl`：历史 Git 上下文索引，用来按 latest / current / branch / commit 查询。
 
 `bindings.jsonl` 会记录：
 
@@ -134,12 +132,12 @@ git agent-sync push
 - agent 类型
 - sidecar 内相对路径
 - 原始 session 路径
-- branch
-- headCommit
-- baseCommit
+- 同步批次 `syncRunId`
+- 业务项目 branch
+- 业务项目 `HEAD` commit
 - dirty 状态
 
-对于 Codex session，`branch/headCommit/baseCommit` 会优先使用 session JSONL 自己记录的 Git 元数据；缺失或不属于当前项目时，再回退到 `push` 时业务仓库的 Git 状态。
+主要锚点始终是执行 `git agent-sync push` 时的业务项目 commit。Codex session JSONL 自己记录的 git 元数据只用于判断项目归属，不作为恢复查询的主 commit。
 
 最后，工具只会在 `.agent-sync-store/` 这个独立 Git 仓库里提交并推送：
 
@@ -172,16 +170,18 @@ git agent-sync pull
 拉取后可以查询：
 
 ```bash
-git agent-sync list --current
-git agent-sync list --branch main
-git agent-sync list --commit 4f7c2a1
+git agent-sync log --latest
+git agent-sync log --current
+git agent-sync log --branch main
+git agent-sync log --commit 4f7c2a1
 ```
 
 查询规则：
 
-- `--commit <sha>` 匹配 `headCommit` 或 `baseCommit`，支持短 SHA。
-- `--branch <name>` 匹配历史记录里的 branch 标签，不解析当前分支指针。
-- `--current` 先匹配当前 `HEAD` commit；如果没有结果，再回退到当前 branch。
+- `--latest` 匹配最近一次 sidecar 同步批次。
+- `--commit <sha>` 匹配同步时记录的业务项目 commit，支持短 SHA。
+- `--branch <name>` 匹配同步时记录的业务项目 branch 标签，不解析当前分支指针。
+- `--current` 先匹配当前业务项目 `HEAD` commit；如果没有结果，再回退到当前 branch。
 - 普通输出会显示会话标题并加编号，方便后续指定恢复；`--json` 保持输出原始 binding 列表。
 
 也就是说，当你切换到某个历史 commit 或 branch 后，可以直接找回当时相关的 agent session。
@@ -191,6 +191,8 @@ git agent-sync list --commit 4f7c2a1
 运行：
 
 ```bash
+git agent-sync restore --latest
+git agent-sync restore --latest 1
 git agent-sync restore --current
 git agent-sync restore --current 1
 git agent-sync restore --branch main
@@ -203,7 +205,6 @@ git agent-sync restore --all
 工具会从 sidecar store 读取 session 文件，并恢复到当前机器对应目录：
 
 - Codex：`~/.codex/sessions/...`
-- Claude Code：`~/.claude/projects/...`
 
 Codex session 默认会在恢复时做轻量跨平台适配：
 

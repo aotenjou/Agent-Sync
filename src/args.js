@@ -15,6 +15,8 @@ export function parseArgs(rawArgs) {
       options.json = true;
     } else if (arg === "--all") {
       options.all = true;
+    } else if (arg === "--latest") {
+      options.latest = true;
     } else if (arg === "--current") {
       options.current = true;
     } else if (arg === "--no-adapt") {
@@ -49,17 +51,18 @@ export function parseArgs(rawArgs) {
 
 export function parseSelector(options, { requireSelector }) {
   const selectors = [
+    options.latest ? { type: "latest" } : null,
     options.current ? { type: "current" } : null,
     options.branch !== undefined ? { type: "branch", value: options.branch } : null,
     options.commit !== undefined ? { type: "commit", value: options.commit } : null
   ].filter(Boolean);
 
   if (selectors.length > 1) {
-    throw new Error("choose only one of --current, --branch, or --commit");
+    throw new Error("choose only one of --latest, --current, --branch, or --commit");
   }
   if (!selectors.length) {
     if (requireSelector) {
-      throw new Error("list requires one of --current, --branch, or --commit");
+      throw new Error("log requires one of --latest, --current, --branch, or --commit");
     }
     return null;
   }
@@ -72,6 +75,9 @@ export function parseSelector(options, { requireSelector }) {
 }
 
 export function formatSelector(selector) {
+  if (selector.type === "latest") {
+    return "latest";
+  }
   if (selector.type === "current") {
     return "current";
   }

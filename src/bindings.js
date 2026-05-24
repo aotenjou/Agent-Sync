@@ -2,37 +2,39 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { BINDINGS_FILE } from "./constants.js";
 import { getGitContext } from "./git.js";
-import { getCodexBindingContext } from "./codex-session.js";
 
-export function writeBindings(config, matches, gitContext) {
-  if (!matches.length) {
+export function writeBindings(config, matches, gitContext, syncRunId = createSyncRunId(gitContext)) {
+  const codexMatches = matches.filter((match) => match.agent === "codex");
+  if (!codexMatches.length) {
     return 0;
   }
 
   const existing = readBindings(config);
   const seen = new Set(existing.map(bindingKey));
   const additions = [];
-  const boundAt = new Date().toISOString();
+  const syncedAt = new Date().toISOString();
 
-  for (const match of matches) {
-    const bindingContext = getMatchBindingContext(match, gitContext, config);
+  for (const match of codexMatches) {
     const binding = {
-      version: 1,
-      boundAt,
+      version: 2,
+      syncRunId,
+      syncedAt,
+      boundAt: syncedAt,
       projectId: config.projectId,
       projectIdentity: config.projectIdentity,
+      projectRemote: config.projectIdentity?.startsWith("git:") ? config.projectIdentity.slice("git:".length) : null,
+      projectBranch: gitContext.branch,
+      projectCommit: gitContext.headCommit,
+      projectBaseCommit: gitContext.baseCommit,
+      projectDirty: gitContext.dirty,
       bundleId: match.bundleId,
-      agent: match.agent,
+      agent: "codex",
       sessionId: match.metadata?.sessionId || null,
       title: match.metadata?.title || null,
       sha256: match.sha256,
       storeRelativePath: match.storeRelativePath,
       originalPath: match.originalPath,
-      agentRelativePath: match.agentRelativePath,
-      branch: bindingContext.branch,
-      headCommit: bindingContext.headCommit,
-      baseCommit: bindingContext.baseCommit,
-      dirty: bindingContext.dirty
+      agentRelativePath: match.agentRelativePath
     };
     const key = bindingKey(binding);
     if (!seen.has(key)) {
@@ -102,7 +104,10 @@ function readBindings(config) {
 }
 
 export function queryBindings(config, selector, gitRoot) {
-  const bindings = readBindings(config);
+  const bindings = readBindings(config).filter((binding) => binding.agent === "codex");
+  if (selector.type === "latest") {
+    return dedupeBindings(filterBindingsByLatestSync(bindings), "latest");
+  }
   if (selector.type === "current") {
     const context = getGitContext(gitRoot);
     const commitMatches = filterBindingsByCommit(bindings, context.headCommit);
@@ -121,25 +126,44 @@ export function queryBindings(config, selector, gitRoot) {
 }
 
 function filterBindingsByCommit(bindings, commit) {
-  return bindings.filter((binding) => matchesCommit(binding.headCommit, commit) || matchesCommit(binding.baseCommit, commit));
+  return bindings.filter((binding) => {
+    return matchesCommit(binding.projectCommit, commit) ||
+      matchesCommit(binding.projectBaseCommit, commit);
+  });
 }
 
 function filterBindingsByBranch(bindings, branch) {
-  return bindings.filter((binding) => binding.branch === branch);
+  return bindings.filter((binding) => binding.projectBranch === branch);
+}
+
+function filterBindingsByLatestSync(bindings) {
+  const latest = bindings
+    .map((binding) => binding.syncRunId || binding.syncedAt || binding.boundAt || "")
+    .filter(Boolean)
+    .sort()
+    .at(-1);
+  if (!latest) {
+    return [];
+  }
+  return bindings.filter((binding) => {
+    return binding.syncRunId === latest || (!binding.syncRunId && (binding.syncedAt || binding.boundAt) === latest);
+  });
 }
 
 function dedupeBindings(bindings, mode) {
   const seen = new Set();
   const result = [];
   for (const binding of bindings) {
-    const key = mode === "commit" ? `${binding.bundleId}:${binding.headCommit}` : bindingKey(binding);
+    const key = mode === "commit"
+      ? `${binding.sessionId || binding.bundleId}:${binding.projectCommit}:${binding.bundleId}`
+      : `${binding.sessionId || binding.bundleId}:${binding.bundleId}`;
     if (!seen.has(key)) {
       seen.add(key);
       result.push(binding);
     }
   }
   return result.sort((a, b) => {
-    const time = String(b.boundAt || "").localeCompare(String(a.boundAt || ""));
+    const time = String(b.syncedAt || b.boundAt || "").localeCompare(String(a.syncedAt || a.boundAt || ""));
     return time || a.bundleId.localeCompare(b.bundleId);
   });
 }
@@ -149,31 +173,32 @@ function matchesCommit(value, query) {
 }
 
 function bindingKey(binding) {
-  return `${binding.bundleId}:${binding.headCommit}:${binding.branch || ""}`;
+  return `${binding.syncRunId || ""}:${binding.bundleId}:${binding.projectCommit || ""}:${binding.projectBranch || ""}`;
 }
 
 export function getBindingsPath(config) {
   return join(config.storePath, "projects", config.projectId, BINDINGS_FILE);
 }
 
-function getMatchBindingContext(match, fallbackGitContext, config) {
-  if (match.agent === "codex" && match.metadata) {
-    return getCodexBindingContext(match.metadata, fallbackGitContext, config, match);
-  }
-  return fallbackGitContext;
-}
-
 function normalizeBinding(binding) {
   if (!binding || typeof binding !== "object") {
     return null;
   }
-  const headCommit = binding.headCommit || binding.commit || binding.baseCommit || null;
-  const baseCommit = binding.baseCommit || headCommit;
+  const projectCommit = binding.projectCommit || null;
+  const projectBaseCommit = binding.projectBaseCommit || projectCommit;
+  const projectBranch = binding.projectBranch ?? null;
   const normalized = {
-    version: binding.version || 1,
-    boundAt: binding.boundAt || null,
+    version: binding.version || 2,
+    syncRunId: binding.syncRunId || null,
+    syncedAt: binding.syncedAt || binding.boundAt || null,
+    boundAt: binding.boundAt || binding.syncedAt || null,
     projectId: binding.projectId || null,
     projectIdentity: binding.projectIdentity || null,
+    projectRemote: binding.projectRemote || null,
+    projectBranch,
+    projectCommit,
+    projectBaseCommit,
+    projectDirty: Boolean(binding.projectDirty ?? binding.dirty),
     bundleId: binding.bundleId || null,
     agent: binding.agent || null,
     sessionId: binding.sessionId || null,
@@ -181,17 +206,20 @@ function normalizeBinding(binding) {
     sha256: binding.sha256 || null,
     storeRelativePath: binding.storeRelativePath || null,
     originalPath: binding.originalPath || null,
-    agentRelativePath: binding.agentRelativePath || null,
-    branch: binding.branch ?? null,
-    headCommit,
-    baseCommit,
-    dirty: Boolean(binding.dirty)
+    agentRelativePath: binding.agentRelativePath || null
   };
   if (!normalized.bundleId || !normalized.agent || !normalized.storeRelativePath) {
     return null;
   }
-  if (!normalized.headCommit && !normalized.baseCommit && !normalized.branch) {
+  if (normalized.agent !== "codex") {
+    return null;
+  }
+  if (!normalized.projectCommit && !normalized.projectBaseCommit && !normalized.projectBranch) {
     return null;
   }
   return normalized;
+}
+
+function createSyncRunId(gitContext) {
+  return `${new Date().toISOString()}:${gitContext.headCommit || "no-head"}`;
 }

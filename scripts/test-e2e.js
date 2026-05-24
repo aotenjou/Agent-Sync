@@ -128,26 +128,37 @@ assert.equal(run("git", ["status", "--porcelain", "--", ".agent-sync-store"], pr
 assert.equal(run("git", ["status", "--porcelain"], projectA), "");
 assert.equal(run("git", ["ls-files", ".agent-sync-store"], projectA), "");
 assert.equal(run("git", ["grep", "-n", "Agent-Sync", "HEAD", "--", "projects"], join(projectA, ".agent-sync-store"), { allowFail: true }), "");
+assert.match(run("git", ["log", "-1", "--pretty=%s"], join(projectA, ".agent-sync-store")), new RegExp(`sync ${projectName} Codex sessions at ${currentCommit.slice(0, 12)}`));
 
 run("git", ["clone", bareProjectRemote, projectB], machineBParent);
 agent(projectB, codexB, claudeB, ["init", "--remote", bareStoreRemote]);
 const pullOut = agent(projectB, codexB, claudeB, ["pull"]);
 assert.match(pullOut, /1 session file\(s\) available for restore/);
 
-const byCurrent = JSON.parse(agent(projectB, codexB, claudeB, ["list", "--current", "--json"]));
-const byBranch = JSON.parse(agent(projectB, codexB, claudeB, ["list", "--branch", "main", "--json"]));
-const byCommit = JSON.parse(agent(projectB, codexB, claudeB, ["list", "--commit", currentCommit.slice(0, 8), "--json"]));
+const byLatest = JSON.parse(agent(projectB, codexB, claudeB, ["log", "--latest", "--json"]));
+const byCurrent = JSON.parse(agent(projectB, codexB, claudeB, ["log", "--current", "--json"]));
+const byBranch = JSON.parse(agent(projectB, codexB, claudeB, ["log", "--branch", "main", "--json"]));
+const byCommit = JSON.parse(agent(projectB, codexB, claudeB, ["log", "--commit", currentCommit.slice(0, 8), "--json"]));
+assert.equal(byLatest.length, 1);
 assert.equal(byCurrent.length, 1);
 assert.equal(byBranch.length, 1);
 assert.equal(byCommit.length, 1);
 assert.equal(byCurrent[0].title, "Continue e2e session");
+assert.equal(byCurrent[0].projectCommit, currentCommit);
 
-const listOut = agent(projectB, codexB, claudeB, ["list", "--current"]);
-assert.match(listOut, /1\. Continue e2e session/);
-assert.match(listOut, /restore:\s+git agent-sync restore --current <index>/);
+const logOut = agent(projectB, codexB, claudeB, ["log", "--current"]);
+assert.match(logOut, /1\. Continue e2e session/);
+assert.match(logOut, /restore:\s+git agent-sync restore --current <index>/);
+assert.match(logOut, /show:\s+git agent-sync show --current <index>/);
+
+const showOut = agent(projectB, codexB, claudeB, ["show", "--latest", "1"]);
+assert.match(showOut, /title:\s+Continue e2e session/);
+assert.match(showOut, new RegExp(`project commit:\\s+${currentCommit}`));
+assert.match(agent(projectB, codexB, claudeB, ["show", byCurrent[0].bundleId]), /bundle:/);
 
 const restoreOut = agent(projectB, codexB, claudeB, ["restore", "--current"]);
 assert.match(restoreOut, /restored codex:/);
+assert.match(agent(projectB, codexB, claudeB, ["restore", "--latest", "1"]), /restored codex:/);
 assert.match(agent(projectB, codexB, claudeB, ["restore", "--current", "1"]), /restored codex:/);
 assert.match(agent(projectB, codexBranch, claudeB, ["restore", "--branch", "main"]), /restored codex:/);
 assert.match(agent(projectB, codexCommit, claudeB, ["restore", "--commit", currentCommit.slice(0, 8)]), /restored codex:/);

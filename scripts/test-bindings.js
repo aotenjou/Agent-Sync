@@ -11,11 +11,14 @@ mkdirSync(projectDir, { recursive: true });
 
 writeFileSync(join(projectDir, "bindings.jsonl"), [
   JSON.stringify({
+    version: 2,
+    syncRunId: "run-1",
+    syncedAt: "2026-05-24T00:00:00.000Z",
     bundleId: "codex-1",
     agent: "codex",
     storeRelativePath: "projects/project/codex/codex-1.jsonl",
-    commit: "abc123",
-    branch: "main"
+    projectCommit: "abc123",
+    projectBranch: "main"
   }),
   "{not-json",
   JSON.stringify({ bundleId: "missing-required-fields" })
@@ -25,11 +28,15 @@ const summary = inspectBindings(config);
 assert.equal(summary.exists, true);
 assert.equal(summary.valid, 1);
 assert.equal(summary.invalid, 2);
-assert.equal(summary.bindings[0].headCommit, "abc123");
-assert.equal(summary.bindings[0].baseCommit, "abc123");
+assert.equal(summary.bindings[0].projectCommit, "abc123");
+assert.equal(summary.bindings[0].projectBaseCommit, "abc123");
 
 const matches = queryBindings(config, { type: "commit", value: "abc" }, process.cwd());
 assert.equal(matches.length, 1);
 assert.equal(matches[0].bundleId, "codex-1");
 
-console.log("bindings compatibility test passed");
+const latest = queryBindings(config, { type: "latest" }, process.cwd());
+assert.equal(latest.length, 1);
+assert.equal(latest[0].bundleId, "codex-1");
+
+console.log("bindings v2 test passed");

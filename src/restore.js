@@ -13,7 +13,7 @@ export function restoreCommand(gitRoot, args, options, config) {
   const selectorIndex = parseRestoreIndex(args, options, Boolean(selector));
   const restoreModes = [Boolean(bundleId && !selector), Boolean(options.all), Boolean(selector)].filter(Boolean).length;
   if (restoreModes !== 1) {
-    throw new Error("restore requires exactly one of a bundle id, --all, --current, --branch, or --commit");
+    throw new Error("restore requires exactly one of a bundle id, --all, --latest, --current, --branch, or --commit");
   }
 
   if (selector) {

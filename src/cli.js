@@ -40,8 +40,13 @@ import { getCodexArchiveInfo, isArchivedCodexSessionPath, summarizeCodexArchiveI
 export async function main(argv) {
   const { command, args, options } = parseArgs(argv.slice(2));
 
-  if (!command || command === "help" || options.help) {
-    printHelp();
+  if (!command || command === "help") {
+    printHelp(args[0]);
+    return;
+  }
+
+  if (options.help) {
+    printHelp(command);
     return;
   }
 
@@ -54,7 +59,8 @@ export async function main(argv) {
   const commands = {
     init: () => initCommand(gitRoot, args, options),
     status: () => statusCommand(gitRoot, options),
-    list: () => listCommand(gitRoot, options),
+    log: () => logCommand(gitRoot, options),
+    show: () => showCommand(gitRoot, args, options),
     push: () => pushCommand(gitRoot),
     pull: () => pullCommand(gitRoot),
     scan: () => scanCommand(gitRoot, options),
@@ -71,26 +77,114 @@ export async function main(argv) {
   await handler();
 }
 
-function printHelp() {
+function printHelp(command = null) {
+  if (command) {
+    printCommandHelp(command);
+    return;
+  }
+
   console.log(`git-agent-sync ${TOOL_VERSION}
 
 Usage:
   git agent-sync init [--remote <url>|<url>] [--store <path>]
   git agent-sync status [--json]
-  git agent-sync list --current|--branch <name>|--commit <sha> [--json]
+  git agent-sync log --latest|--current|--branch <name>|--commit <sha> [--json]
+  git agent-sync show <bundle-id>|--latest <index>|--current <index>|--branch <name> <index>|--commit <sha> <index> [--json]
   git agent-sync push
   git agent-sync pull
   git agent-sync scan [--json]
-  git agent-sync restore <bundle-id>|--all|--current|--branch <name>|--commit <sha> [index|--index <n>] [--no-adapt]
+  git agent-sync restore <bundle-id>|--all|--latest|--current|--branch <name>|--commit <sha> [index|--index <n>] [--no-adapt]
   git agent-sync install-hooks
   git agent-sync doctor
 
+Git-style behavior:
+  - log browses Codex session snapshots, like git log
+  - show prints one snapshot detail, like git show <object>
+  - restore writes selected snapshots back into your local agent directory
+  - latest means the most recent sidecar sync batch
+  - current means the current project HEAD commit
+  - branch is a historical sync label, not a moving branch pointer
+  - commit matches the project commit recorded during sidecar sync
+
 MVP behavior:
   - Detects Codex sessions in ~/.codex/sessions/**/*.jsonl
-  - Detects Claude Code sessions in ~/.claude/projects/**/*.jsonl
   - Stores matched session files in a sidecar Git repo
   - Does not add agent sessions to your project Git history
 `);
+}
+
+function printCommandHelp(command) {
+  const help = {
+    init: `Usage:
+  git agent-sync init [--remote <url>|<url>] [--store <path>]
+
+Initializes project-local config and a sidecar Git repo.
+Aligns with: git init plus git remote add for the sidecar store.`,
+    status: `Usage:
+  git agent-sync status [--json]
+
+Scans local Codex sessions and reports which files match this Git project.`,
+    scan: `Usage:
+  git agent-sync scan [--json]
+
+Alias of status. Scans local Codex sessions without pushing.`,
+    log: `Usage:
+  git agent-sync log --latest [--json]
+  git agent-sync log --current [--json]
+  git agent-sync log --branch <name> [--json]
+  git agent-sync log --commit <sha> [--json]
+
+Browses recoverable Codex session snapshots.
+Aligns with: git log.
+Selectors:
+  --latest       most recent sidecar sync batch
+  --current      current project HEAD commit
+  --branch name  branch label recorded during sync
+  --commit sha   project commit recorded during sync`,
+    show: `Usage:
+  git agent-sync show <bundle-id> [--json]
+  git agent-sync show --latest <index> [--json]
+  git agent-sync show --current <index> [--json]
+  git agent-sync show --branch <name> <index> [--json]
+  git agent-sync show --commit <sha> <index> [--json]
+
+Prints one Codex session snapshot detail without restoring it.
+Aligns with: git show <object>.`,
+    push: `Usage:
+  git agent-sync push
+
+Copies matching Codex session snapshots into the sidecar repo and commits them.
+Aligns with: git push. The sidecar commit records the current project HEAD commit.`,
+    pull: `Usage:
+  git agent-sync pull
+
+Fast-forwards the sidecar repo from its remote.
+Run log or restore after pull to inspect or recover sessions.`,
+    restore: `Usage:
+  git agent-sync restore <bundle-id> [--no-adapt]
+  git agent-sync restore --all [--no-adapt]
+  git agent-sync restore --latest [index|--index <n>] [--no-adapt]
+  git agent-sync restore --current [index|--index <n>] [--no-adapt]
+  git agent-sync restore --branch <name> [index|--index <n>] [--no-adapt]
+  git agent-sync restore --commit <sha> [index|--index <n>] [--no-adapt]
+
+Restores selected Codex snapshots into the local Codex sessions directory.
+Aligns with: git restore/checkout for local working context.`,
+    "install-hooks": `Usage:
+  git agent-sync install-hooks
+
+Installs a project pre-push hook that runs git-agent-sync push before git push.`,
+    doctor: `Usage:
+  git agent-sync doctor
+
+Checks config, sidecar remote, manifest, bindings, and local agent directories.`
+  };
+
+  const text = help[command];
+  if (!text) {
+    throw new Error(`unknown command "${command}". Run "git agent-sync --help".`);
+  }
+  console.log(text);
 }
 
 function initCommand(gitRoot, args, options) {
@@ -146,7 +240,7 @@ function scanCommand(gitRoot, options) {
   return statusCommand(gitRoot, options);
 }
 
-function listCommand(gitRoot, options) {
+function logCommand(gitRoot, options) {
   const config = readConfigWithBundle(gitRoot);
   const selector = parseSelector(options, { requireSelector: true });
   const bindings = queryBindings(config, selector, gitRoot);
@@ -159,6 +253,23 @@ function listCommand(gitRoot, options) {
   printBindings(config, bindings, selector);
 }
 
+function showCommand(gitRoot, args, options) {
+  const config = readConfigWithBundle(gitRoot);
+  const selector = parseSelector(options, { requireSelector: false });
+  const match = selector
+    ? selectBindingByIndex(queryBindings(config, selector, gitRoot), parseRequiredIndex(args, options, selector), selector)
+    : findBindingByBundleId(config, args[0]);
+  if (!match) {
+    throw new Error(selector ? `no bindings found for ${formatSelector(selector)}` : `no bundle found for "${args[0] || ""}"`);
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify(match, null, 2));
+    return;
+  }
+  printBindingDetail(config, match);
+}
+
 function pushCommand(gitRoot) {
   const config = readConfigWithBundle(gitRoot);
   ensureStoreRepo(config.storePath, config.remote);
@@ -166,6 +277,7 @@ function pushCommand(gitRoot) {
   adoptExistingProjectBundle(config);
   writeConfig(gitRoot, config);
   const gitContext = getGitContext(gitRoot);
+  const syncRunId = `${new Date().toISOString()}:${gitContext.headCommit}`;
   const archiveInfo = getCodexArchiveInfo(getAgentRoot("codex"), { gitRoot });
   const scan = scanSessions(gitRoot, config, archiveInfo);
   writeJson(join(gitRoot, CACHE_FILE), scan);
@@ -174,14 +286,16 @@ function pushCommand(gitRoot) {
   const foreignPruned = pruneForeignProjectSidecarEntries(config);
   const copied = copyMatchesToStore(config, scan, archiveInfo);
   writeManifest(config, scan, gitContext);
-  const bindingsAdded = writeBindings(config, scan.matches, gitContext);
+  const bindingsAdded = writeBindings(config, scan.matches, gitContext, syncRunId);
 
   runGit(["add", "."], config.storePath);
   const diff = runGit(["diff", "--cached", "--quiet"], config.storePath, { allowFail: true });
   if (diff.status === 0) {
     console.log(`agent-sync: no sidecar changes (${copied.length} matched sessions, ${pruned.removedFiles} archived removed, ${foreignPruned.removedFiles} foreign removed).`);
   } else {
-    runGit(["commit", "-m", `sync ${config.projectName} agent sessions`], config.storePath);
+    const shortCommit = gitContext.headCommit.slice(0, 12);
+    const branch = gitContext.branch || "detached";
+    runGit(["commit", "-m", `sync ${config.projectName} Codex sessions at ${shortCommit} (${branch})`], config.storePath);
     console.log(`agent-sync: committed ${copied.length} matched session file(s), ${bindingsAdded} new binding(s), ${pruned.removedFiles} archived removed, ${foreignPruned.removedFiles} foreign removed.`);
   }
 
@@ -440,15 +554,62 @@ function printBindings(config, bindings, selector) {
   console.log(`bindings: ${bindings.length}`);
   if (bindings.length) {
     console.log(`restore:  git agent-sync restore ${formatSelectorForCommand(selector)} <index>`);
+    console.log(`show:     git agent-sync show ${formatSelectorForCommand(selector)} <index>`);
   }
   bindings.forEach((binding, index) => {
-    const branch = binding.branch || "detached";
-    const dirty = binding.dirty ? "dirty" : "clean";
+    const branch = binding.projectBranch || "detached";
+    const dirty = binding.projectDirty ? "dirty" : "clean";
     const title = getBindingTitle(config, binding, titles);
     console.log(`${index + 1}. ${title}`);
-    console.log(`   ${binding.bundleId} ${binding.agent} ${binding.headCommit || "no-commit"} ${branch} ${dirty}`);
+    console.log(`   ${binding.bundleId} ${binding.agent} ${binding.projectCommit || "no-commit"} ${branch} ${dirty}`);
     console.log(`   ${binding.originalPath}`);
   });
+}
+
+function printBindingDetail(config, binding) {
+  const title = getBindingTitle(config, binding, loadCodexSessionTitles());
+  console.log(`title:          ${title}`);
+  console.log(`agent:          ${binding.agent}`);
+  console.log(`bundle:         ${binding.bundleId}`);
+  console.log(`session:        ${binding.sessionId || "unknown"}`);
+  console.log(`project commit: ${binding.projectCommit || "unknown"}`);
+  console.log(`project branch: ${binding.projectBranch || "detached"}`);
+  console.log(`project dirty:  ${binding.projectDirty ? "true" : "false"}`);
+  console.log(`synced at:      ${binding.syncedAt || binding.boundAt || "unknown"}`);
+  console.log(`sync run:       ${binding.syncRunId || "unknown"}`);
+  console.log(`sha256:         ${binding.sha256 || "unknown"}`);
+  console.log(`store path:     ${binding.storeRelativePath}`);
+  console.log(`original path:  ${binding.originalPath}`);
+  console.log(`restore:        git agent-sync restore ${binding.bundleId}`);
+}
+
+function selectBindingByIndex(bindings, index, selector) {
+  if (!bindings.length) {
+    return null;
+  }
+  if (index > bindings.length) {
+    throw new Error(`show index ${index} is out of range for ${formatSelector(selector)} (${bindings.length} binding(s))`);
+  }
+  return bindings[index - 1] || null;
+}
+
+function parseRequiredIndex(args, options, selector) {
+  const value = options.index ?? args[0];
+  if (value === null || value === undefined) {
+    throw new Error(`show ${formatSelector(selector)} requires an index`);
+  }
+  if (!/^\d+$/.test(String(value)) || Number(value) < 1) {
+    throw new Error("show index must be a positive number");
+  }
+  return Number(value);
+}
+
+function findBindingByBundleId(config, bundleId) {
+  if (!bundleId) {
+    throw new Error("show requires a bundle id or selector index");
+  }
+  const summary = inspectBindings(config);
+  return summary.bindings.find((binding) => binding.bundleId === bundleId) || null;
 }
 
 function getBindingTitle(config, binding, titles) {
@@ -469,6 +630,9 @@ function getBindingTitle(config, binding, titles) {
 }
 
 function formatSelectorForCommand(selector) {
+  if (selector.type === "latest") {
+    return "--latest";
+  }
   if (selector.type === "current") {
     return "--current";
   }
