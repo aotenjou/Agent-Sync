@@ -12,7 +12,7 @@ import {
 import { parseArgs, parseSelector, formatSelector } from "./args.js";
 import { getAgentRoot, scanSessions } from "./agents.js";
 import { getBindingsPath, inspectBindings, queryBindings, writeBindings } from "./bindings.js";
-import { extractCodexSessionMetadata, loadCodexSessionTitles } from "./codex-session.js";
+import { cleanCodexTitle, extractCodexSessionMetadata, loadCodexSessionTitles } from "./codex-session.js";
 import {
   legacyProjectIdForPath,
   readConfig,
@@ -652,18 +652,19 @@ function findBindingByBundleId(config, bundleId) {
 }
 
 function getBindingTitle(config, binding, titles) {
-  if (binding.title) {
-    return binding.title;
+  const bindingTitle = binding.agent === "codex" ? cleanCodexTitle(binding.title) : binding.title;
+  if (bindingTitle) {
+    return compactTitle(bindingTitle);
   }
   if (binding.agent === "codex") {
     const title = titles.get(binding.sessionId) || getStoredSessionTitle(config, binding);
     if (title) {
-      return title;
+      return compactTitle(title);
     }
   }
   const storedTitle = getStoredSessionTitle(config, binding);
   if (storedTitle) {
-    return storedTitle;
+    return compactTitle(storedTitle);
   }
   return binding.bundleId;
 }

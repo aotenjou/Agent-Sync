@@ -294,9 +294,11 @@ src/
 
 Codex 扫描和 restore 适配会尽量沿用 Codex JSONL 的原生结构。提取器会从 `session_meta.payload.cwd`、`session_meta.payload.git`、`turn_context.payload.cwd` 和 `response_item.payload.arguments.workdir` 读取 per-session 事实。恢复时的路径映射也会优先使用这些结构化字段，只有结构字段不足时才扫描 transcript 字符串兜底，并且会跳过 `encrypted_content` 这类不可解析字段。
 
+会话标题会尽量复用 Codex UI 的来源。`push` 扫描时会优先读取 `state_5.sqlite` 的 `threads.title`，再用 `threads.preview`、`threads.first_user_message`、`session_index.jsonl` 的 `thread_name` 和 JSONL 里的标题/首条有效用户消息兜底。解析到的标题会写入 `bindings.jsonl`，所以另一台机器 `pull` 后，即使没有源机器的 `state_5.sqlite`，`log` 和 `show` 也能显示同一批标题。
+
 Agent-Sync 不把下面这些 `.codex` 内容作为核心项目/session 判断依据：
 
-- `session_index.jsonl` 只有 session id、标题和更新时间，适合未来做展示优化，但不足以判断项目归属。
+- `session_index.jsonl` 只有 session id、标题和更新时间，只适合作为标题兜底，不足以判断项目归属。
 - `config.toml` 记录可信项目路径和用户设置，但不是 per-session 事实来源。
 - `.codex-global-state.json` 是应用/UI 状态，可能包含与当前项目无关的个人历史。
 - `shell_snapshots/` 体积可能较大，也有隐私风险，因此不纳入 MVP 默认同步。

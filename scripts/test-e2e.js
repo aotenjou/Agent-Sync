@@ -58,7 +58,6 @@ writeJsonl(sessionPath, [
   {
     type: "session_meta",
     payload: {
-      thread_name: "Continue e2e session",
       id: "session-current",
       cwd: windowsRoot,
       git: {
@@ -81,6 +80,9 @@ writeJsonl(sessionPath, [
       })
     }
   }
+]);
+writeCodexState(codexA, [
+  ["session-current", "Continue e2e session", "Preview should not win", "First message should not win"]
 ]);
 writeJsonl(foreignSessionPath, [
   {
@@ -145,6 +147,7 @@ assert.equal(byBranch.length, 1);
 assert.equal(byCommit.length, 1);
 assert.equal(byCurrent[0].title, "Continue e2e session");
 assert.equal(byCurrent[0].projectCommit, currentCommit);
+assert.match(readFileSync(join(projectB, ".agent-sync-store", byCurrent[0].storeRelativePath), "utf8"), /session-current/);
 
 const logOut = agent(projectB, codexB, claudeB, ["log", "--current"]);
 assert.match(logOut, /1\. Continue e2e session/);
@@ -209,6 +212,22 @@ function run(command, args, cwd, env = {}) {
 function writeJsonl(path, items) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${items.map((item) => JSON.stringify(item)).join("\n")}\n`);
+}
+
+function writeCodexState(codexHome, rows) {
+  const result = spawnSync("python3", ["-", join(codexHome, "state_5.sqlite")], {
+    input: `import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("create table threads (id text primary key, title text not null, preview text not null, first_user_message text not null)")
+for row in ${JSON.stringify(rows)}:
+    con.execute("insert into threads values (?, ?, ?, ?)", row)
+con.commit()
+`,
+    encoding: "utf8"
+  });
+  if (result.status !== 0) {
+    throw new Error(result.stderr || "failed to create fake Codex state");
+  }
 }
 
 function parseJsonl(content) {

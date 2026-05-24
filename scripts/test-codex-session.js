@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import {
   adaptCodexSessionContent,
+  cleanCodexTitle,
   extractCodexSessionMetadata,
   getCodexContentProjectMatch,
-  isCodexSessionContentForProject
+  isCodexSessionContentForProject,
+  loadCodexSessionTitles
 } from "../src/codex-session.js";
 
 const targetRoot = "/Users/test/workspace/MokioAgent";
@@ -32,6 +38,7 @@ for (const fixture of [
   const content = makeSession(fixture);
   const metadata = extractCodexSessionMetadata(content);
   assert.equal(metadata.sessionId, `${fixture.name}-session`);
+  assert.equal(metadata.title, `Fix ${fixture.name} session`);
   assert.equal(metadata.projectRoots[0], fixture.root.replaceAll("\\", "/"));
   assert.equal(metadata.workdirs[0], fixture.root.replaceAll("\\", "/"));
   assert.equal(metadata.gitContexts[0].commit, `${fixture.name}-commit`);
@@ -42,14 +49,16 @@ for (const fixture of [
   });
   assert.equal(result.adapted, true);
   const lines = parseJsonl(result.content);
-  const args = JSON.parse(lines[2].payload.arguments);
+  const execLine = lines.find((line) => line.payload?.type === "function_call");
+  const outputLine = lines.find((line) => line.payload?.type === "function_call_output");
+  const args = JSON.parse(execLine.payload.arguments);
   assert.equal(lines[0].payload.cwd, targetRoot);
   assert.equal(lines[1].payload.cwd, targetRoot);
   assert.equal(args.workdir, targetRoot);
   assert.equal(args.cmd.endsWith(`${targetRoot}/src`), true);
-  assert.equal(lines[3].payload.output.endsWith(`${targetRoot}/src/index.js`), true);
-  assert.equal(lines[3].edited_files[0], `${targetRoot}/src/index.js`);
-  assert.equal(lines[3].payload.encrypted_content, `keep ${fixture.root}\\secret.txt`);
+  assert.equal(outputLine.payload.output.endsWith(`${targetRoot}/src/index.js`), true);
+  assert.equal(outputLine.edited_files[0], `${targetRoot}/src/index.js`);
+  assert.equal(outputLine.payload.encrypted_content, `keep ${fixture.root}\\secret.txt`);
   assert.ok(lines[0].payload.agentSyncAdapted);
 
   const shouldChangeShell = process.platform === "win32" ? fixture.name !== "windows" : fixture.name === "windows";
@@ -107,6 +116,65 @@ const unstructuredMatch = getCodexContentProjectMatch(unstructuredContent, mokio
 assert.equal(unstructuredMatch.matched, false);
 assert.equal(unstructuredMatch.reason, "codex:missing-project-metadata");
 
+const codexHome = mkdtempSync(join(tmpdir(), "agent-sync-codex-home-"));
+writeFileSync(join(codexHome, "session_index.jsonl"), `${JSON.stringify({
+  id: "index-session",
+  thread_name: "Index title"
+})}\n`);
+const statePath = join(codexHome, "state_5.sqlite");
+const sqlite = spawnSync("python3", ["-", statePath], {
+  input: `import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("create table threads (id text primary key, title text not null, preview text not null, first_user_message text not null)")
+con.execute("insert into threads values (?, ?, ?, ?)", ("state-session", "State title", "Preview fallback", "First fallback"))
+con.execute("insert into threads values (?, ?, ?, ?)", ("preview-session", "", "Preview title", "First fallback"))
+con.execute("insert into threads values (?, ?, ?, ?)", ("first-session", "", "", "Traceback (most recent call last):\\\\nFile \\"bad.py\\"\\\\n修改一下报错"))
+con.execute("insert into threads values (?, ?, ?, ?)", ("state-wins-session", "State wins", "Index should not overwrite", "First fallback"))
+con.commit()
+`,
+  encoding: "utf8"
+});
+if (sqlite.status === 0) {
+  writeFileSync(join(codexHome, "session_index.jsonl"), `${JSON.stringify({
+    id: "state-wins-session",
+    thread_name: "Index should not overwrite"
+  })}\n${readFileSync(join(codexHome, "session_index.jsonl"), "utf8")}`);
+  const titles = loadCodexSessionTitles(codexHome);
+  assert.equal(titles.get("state-session"), "State title");
+  assert.equal(titles.get("preview-session"), "Preview title");
+  assert.equal(titles.get("first-session"), "修改一下报错");
+  assert.equal(titles.get("state-wins-session"), "State wins");
+  assert.equal(titles.get("index-session"), "Index title");
+}
+
+const fallbackMetadata = extractCodexSessionMetadata([
+  {
+    type: "session_meta",
+    payload: {
+      id: "jsonl-fallback-session",
+      cwd: targetRoot,
+      thread_name: "<environment_context><cwd>/tmp</cwd></environment_context>"
+    }
+  },
+  {
+    type: "event_msg",
+    payload: {
+      type: "thread_name_updated",
+      thread_name: "Updated JSONL title"
+    }
+  },
+  {
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "user",
+      content: "First user fallback title"
+    }
+  }
+].map((line) => JSON.stringify(line)).join("\n"));
+assert.equal(fallbackMetadata.title, "Updated JSONL title");
+assert.equal(cleanCodexTitle("</environment_context>"), null);
+
 console.log("codex session path adaptation test passed");
 
 function makeSession({ name, root, shell, cmd }) {
@@ -124,6 +192,22 @@ function makeSession({ name, root, shell, cmd }) {
       }
     },
     { type: "turn_context", payload: { cwd: root } },
+    {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: `<environment_context><cwd>${root}</cwd></environment_context>`
+      }
+    },
+    {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: `Fix ${name} session`
+      }
+    },
     {
       type: "response_item",
       payload: {

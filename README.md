@@ -269,11 +269,13 @@ src/
 
 Codex scanning and restore adaptation follow Codex's native JSONL shape. The extractor reads per-session facts from `session_meta.payload.cwd`, `session_meta.payload.git`, `turn_context.payload.cwd`, and `response_item.payload.arguments.workdir`. Restore path mapping uses those structured fields first, then scans transcript strings only as a fallback, while skipping opaque fields such as `encrypted_content`.
 
+Session titles reuse Codex UI's own sources where possible. During `push`, Agent-Sync first reads `state_5.sqlite` `threads.title`, then falls back to `threads.preview`, `threads.first_user_message`, `session_index.jsonl` `thread_name`, JSONL thread-name events, and the first useful user message. The resolved title is written to `bindings.jsonl`, so another machine can show the same `log` / `show` title after `pull` even without the source machine's `state_5.sqlite`.
+
 Codex project ownership is strict and based only on structured metadata: `repository_url` must match the current project remote, and `cwd` / `workdir` must not include another project path. A session that belongs to another Git repository, another project path, multiple project workdirs, or has no structured project metadata is skipped even if its transcript text mentions this project name, and restore applies the same guard before writing into the local Codex directory.
 
 Agent-Sync intentionally does not use these `.codex` files as core project/session truth:
 
-- `session_index.jsonl` only contains session id, title, and update time, so it is useful for future display but not for project ownership.
+- `session_index.jsonl` only contains session id, title, and update time, so it is useful as a title fallback but not for project ownership.
 - `config.toml` contains trusted project paths and user settings, but it is not a per-session record.
 - `.codex-global-state.json` is app/UI state and can include personal history unrelated to a project.
 - `shell_snapshots/` can be large and privacy-sensitive, so it is not part of default MVP sync.

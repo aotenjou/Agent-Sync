@@ -3,7 +3,7 @@ import { join, relative } from "node:path";
 import { SCAN_CACHE_FILE } from "./constants.js";
 import { normalizePath, readJson, shrinkHome, toSlash, writeJson } from "./utils.js";
 
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 
 export function getScanCachePath(gitRoot) {
   return join(gitRoot, SCAN_CACHE_FILE);

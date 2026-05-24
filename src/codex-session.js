@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { sha256, normalizePath, unique } from "./utils.js";
 import { normalizeRemoteUrl } from "./git.js";
 
@@ -14,6 +15,8 @@ export function extractCodexSessionMetadata(content) {
   };
   const projectRoots = new Set();
   const workdirs = new Set();
+  const threadTitleCandidates = [];
+  let firstUserMessageTitle = null;
 
   for (const item of readJsonlItems(content)) {
     const payload = item.payload;
@@ -23,7 +26,7 @@ export function extractCodexSessionMetadata(content) {
 
     if (item.type === "session_meta") {
       metadata.sessionId ||= payload.id || null;
-      metadata.title ||= payload.thread_name || payload.title || payload.name || null;
+      threadTitleCandidates.push(payload.thread_name, payload.title, payload.name);
       addPath(projectRoots, payload.cwd);
       if (payload.git && typeof payload.git === "object") {
         metadata.gitContexts.push({
@@ -36,7 +39,9 @@ export function extractCodexSessionMetadata(content) {
     } else if (item.type === "turn_context") {
       addPath(projectRoots, payload.cwd);
     } else if (item.type === "event_msg" && payload.type === "thread_name_updated") {
-      metadata.title = payload.thread_name || metadata.title;
+      threadTitleCandidates.push(payload.thread_name);
+    } else if (item.type === "response_item" && payload.type === "message") {
+      firstUserMessageTitle ||= getMessageTitle(payload);
     } else if (item.type === "response_item" && payload.type === "function_call" && payload.name === "exec_command") {
       const args = parseArguments(payload.arguments);
       addPath(workdirs, args?.workdir);
@@ -45,11 +50,13 @@ export function extractCodexSessionMetadata(content) {
 
   metadata.projectRoots = [...projectRoots];
   metadata.workdirs = [...workdirs];
+  metadata.title = chooseLatestTitle(threadTitleCandidates) || firstUserMessageTitle;
   return metadata;
 }
 
-export function loadCodexSessionTitles(codexHome = join(homedir(), ".codex")) {
-  const titles = new Map();
+export function loadCodexSessionTitles(codexRoot = join(homedir(), ".codex")) {
+  const codexHome = resolveCodexHome(codexRoot);
+  const titles = loadCodexStateTitles(codexHome);
   const indexPath = join(codexHome, "session_index.jsonl");
   if (!existsSync(indexPath)) {
     return titles;
@@ -61,11 +68,76 @@ export function loadCodexSessionTitles(codexHome = join(homedir(), ".codex")) {
     }
     try {
       const item = JSON.parse(line);
-      if (item.id && item.thread_name) {
-        titles.set(item.id, item.thread_name);
+      const title = cleanTitle(item.thread_name);
+      if (item.id && title && !titles.has(item.id)) {
+        titles.set(item.id, title);
       }
     } catch {
       // Ignore partial index lines.
+    }
+  }
+  return titles;
+}
+
+export function cleanCodexTitle(value) {
+  return cleanTitle(value);
+}
+
+export function resolveCodexHome(codexRoot = join(homedir(), ".codex")) {
+  const normalized = normalizePath(codexRoot);
+  const leaf = basename(normalized);
+  if (leaf === "sessions" || leaf === "archived_sessions") {
+    return dirname(normalized);
+  }
+  if (existsSync(join(normalized, "state_5.sqlite")) || existsSync(join(normalized, "session_index.jsonl"))) {
+    return normalized;
+  }
+  const parent = dirname(normalized);
+  if (existsSync(join(parent, "state_5.sqlite")) || existsSync(join(parent, "session_index.jsonl"))) {
+    return parent;
+  }
+  return normalized;
+}
+
+function loadCodexStateTitles(codexHome) {
+  const titles = new Map();
+  const statePath = join(codexHome, "state_5.sqlite");
+  if (!existsSync(statePath)) {
+    return titles;
+  }
+
+  const result = spawnSync("python3", ["-", statePath], {
+    input: `import json, sqlite3, sys
+path = sys.argv[1]
+try:
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    cur = con.cursor()
+    cols = {row[1] for row in cur.execute("pragma table_info(threads)")}
+    wanted = [col for col in ("id", "title", "preview", "first_user_message") if col in cols]
+    if "id" in wanted:
+        query = "select " + ", ".join(wanted) + " from threads"
+        for row in cur.execute(query):
+            print(json.dumps(dict(zip(wanted, row)), ensure_ascii=False))
+except Exception:
+    pass
+`,
+    encoding: "utf8"
+  });
+  if (result.status !== 0 || !result.stdout) {
+    return titles;
+  }
+  for (const line of result.stdout.split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const item = JSON.parse(line);
+      const title = chooseFirstTitle([item.title, item.preview, item.first_user_message]);
+      if (item.id && title) {
+        titles.set(item.id, title);
+      }
+    } catch {
+      // Ignore partial SQLite title rows.
     }
   }
   return titles;
@@ -172,6 +244,124 @@ function getCodexPathOwnership(metadata, config) {
     }
   }
   return { matched, foreign };
+}
+
+function getMessageTitle(payload) {
+  if (payload.role !== "user") {
+    return null;
+  }
+  const text = getMessageText(payload);
+  return cleanTitle(text);
+}
+
+function chooseFirstTitle(values) {
+  for (const value of values) {
+    const title = cleanTitle(value);
+    if (title) {
+      return title;
+    }
+  }
+  return null;
+}
+
+function chooseLatestTitle(values) {
+  for (let i = values.length - 1; i >= 0; i -= 1) {
+    const title = cleanTitle(values[i]);
+    if (title) {
+      return title;
+    }
+  }
+  return null;
+}
+
+function getMessageText(payload) {
+  if (typeof payload.content === "string") {
+    return payload.content;
+  }
+  if (!Array.isArray(payload.content)) {
+    return "";
+  }
+  return payload.content
+    .map((item) => item?.text || item?.input_text || "")
+    .filter(Boolean)
+    .join("\n");
+}
+
+function isLowSignalTitle(value) {
+  const text = value.trim();
+  return !text ||
+    text.startsWith("<environment_context>") ||
+    text.startsWith("</environment_context>") ||
+    text.startsWith("<ide_") ||
+    text.startsWith("<collaboration_mode>") ||
+    text.startsWith("<skills_instructions>") ||
+    text.startsWith("# AGENTS.md instructions") ||
+    text.startsWith("<permissions instructions>") ||
+    text.startsWith("Knowledge cutoff:") ||
+    text.startsWith("You are Codex") ||
+    text.includes("Traceback (most recent call last)") ||
+    /^\([^)]+\)\s+[A-Z]:[\\/].*>/.test(text) ||
+    /^[A-Z]:[\\/].*>/.test(text);
+}
+
+function cleanTitle(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const text = value.trim();
+  if (!text) {
+    return null;
+  }
+  if (!isLowSignalTitle(text)) {
+    return compactTitle(text);
+  }
+  const recovered = recoverPromptFromLowSignalTitle(text);
+  return recovered ? compactTitle(recovered) : null;
+}
+
+function recoverPromptFromLowSignalTitle(value) {
+  const lines = value
+    .replace(/\\r\\n|\\n/g, "\n")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i];
+    if (isLowSignalTitleLine(line)) {
+      continue;
+    }
+    if (/[\u4e00-\u9fff]/.test(line) || /[a-zA-Z]{3,}/.test(line)) {
+      return line;
+    }
+  }
+  return null;
+}
+
+function isLowSignalTitleLine(line) {
+  return line.startsWith("<environment_context") ||
+    line.startsWith("</environment_context") ||
+    line.startsWith("<ide_") ||
+    line.startsWith("<collaboration_mode>") ||
+    line.startsWith("<skills_instructions>") ||
+    line.startsWith("<permissions instructions>") ||
+    line.startsWith("# AGENTS.md instructions") ||
+    line.startsWith("Knowledge cutoff:") ||
+    line.startsWith("You are Codex") ||
+    line.startsWith("File ") ||
+    line.startsWith("Traceback ") ||
+    line.startsWith("Error code:") ||
+    line.startsWith("openai.") ||
+    line.startsWith("{'error':") ||
+    /^\^+$/.test(line) ||
+    /^\.*<\d+ lines>\.*$/.test(line) ||
+    /^\([^)]+\)\s+[A-Z]:[\\/].*>/.test(line) ||
+    /^[A-Z]:[\\/].*>/.test(line) ||
+    /^[~\w.]+\(.*\)/.test(line) ||
+    /^\([^)]+\)\s+.*(?:➜|\$|#|>)\s+/.test(line);
+}
+
+function compactTitle(value) {
+  return value.replace(/\s+/g, " ").trim().slice(0, 96);
 }
 
 export function adaptCodexSessionContent(content, config) {
