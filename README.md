@@ -84,6 +84,12 @@ After that, normal project pushes run `git-agent-sync push` first:
 git push
 ```
 
+The hook exits successfully without syncing when `.agent-sync/config.json` or the sidecar Git repo is missing, so it will not block normal project pushes before `init` has been completed. To remove the hook:
+
+```bash
+git agent-sync uninstall-hooks
+```
+
 ## Commands
 
 ```bash
@@ -111,6 +117,7 @@ git agent-sync restore --commit <sha>
 git agent-sync restore --commit <sha> 1
 git agent-sync restore --current --no-adapt
 git agent-sync install-hooks
+git agent-sync uninstall-hooks
 git agent-sync doctor
 ```
 

@@ -107,6 +107,12 @@ hook 会先运行：
 git-agent-sync push
 ```
 
+如果当前项目缺少 `.agent-sync/config.json`，或者 sidecar Git 仓库还不存在，hook 会直接成功退出，不会阻塞业务仓库自己的 `git push`。如果需要移除 hook：
+
+```bash
+git agent-sync uninstall-hooks
+```
+
 ## 命令列表
 
 ```bash
@@ -134,6 +140,7 @@ git agent-sync restore --commit <sha>
 git agent-sync restore --commit <sha> 1
 git agent-sync restore --current --no-adapt
 git agent-sync install-hooks
+git agent-sync uninstall-hooks
 git agent-sync doctor
 ```
 

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import {
   CACHE_FILE,
@@ -65,6 +65,7 @@ export async function main(argv) {
     pull: () => pullCommand(gitRoot),
     scan: () => scanCommand(gitRoot, options),
     "install-hooks": () => installHooksCommand(gitRoot),
+    "uninstall-hooks": () => uninstallHooksCommand(gitRoot),
     restore: () => restoreCommand(gitRoot, args, options, readConfigWithBundle(gitRoot)),
     doctor: () => doctorCommand(gitRoot)
   };
@@ -95,6 +96,7 @@ Usage:
   git agent-sync scan [--json]
   git agent-sync restore <bundle-id>|--all|--latest|--current|--branch <name>|--commit <sha> [index|--index <n>] [--no-adapt]
   git agent-sync install-hooks
+  git agent-sync uninstall-hooks
   git agent-sync doctor
 
 Git-style behavior:
@@ -173,7 +175,13 @@ Aligns with: git restore/checkout for local working context.`,
     "install-hooks": `Usage:
   git agent-sync install-hooks
 
-Installs a project pre-push hook that runs git-agent-sync push before git push.`,
+Installs a project pre-push hook that runs git-agent-sync push before git push.
+The hook skips when .agent-sync/config.json or the sidecar Git repo is missing.`,
+    "uninstall-hooks": `Usage:
+  git agent-sync uninstall-hooks
+
+Removes the pre-push hook installed by git-agent-sync.
+It refuses to remove hooks that were not installed by Agent-Sync.`,
     doctor: `Usage:
   git agent-sync doctor
 
@@ -347,12 +355,29 @@ function pullCommand(gitRoot) {
 }
 
 function installHooksCommand(gitRoot) {
-  readConfigWithBundle(gitRoot);
   const hooksDir = join(gitRoot, ".git", "hooks");
   mkdirSync(hooksDir, { recursive: true });
   const hookPath = join(hooksDir, "pre-push");
+  if (existsSync(hookPath)) {
+    const existing = readFileSync(hookPath, "utf8");
+    if (!existing.includes("AGENT_SYNC_HOOK=pre-push")) {
+      throw new Error(`pre-push hook already exists and was not installed by agent-sync: ${hookPath}`);
+    }
+  }
   const hook = `#!/bin/sh
-# Installed by git-agent-sync.
+# Installed by git-agent-sync. AGENT_SYNC_HOOK=pre-push
+CONFIG_FILE=".agent-sync/config.json"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+  exit 0
+fi
+
+STORE_PATH="$(node -e "try { const fs = require('fs'); const path = JSON.parse(fs.readFileSync('$CONFIG_FILE', 'utf8')).storePath || '.agent-sync-store'; process.stdout.write(path); } catch (_) { process.exit(0); }")"
+
+if [ -z "$STORE_PATH" ] || [ ! -d "$STORE_PATH/.git" ]; then
+  exit 0
+fi
+
 if command -v git-agent-sync >/dev/null 2>&1; then
   git-agent-sync push
 elif command -v agent-sync >/dev/null 2>&1; then
@@ -363,6 +388,20 @@ fi
 `;
   writeFileSync(hookPath, hook, { mode: 0o755 });
   console.log(`agent-sync: installed pre-push hook at ${hookPath}`);
+}
+
+function uninstallHooksCommand(gitRoot) {
+  const hookPath = join(gitRoot, ".git", "hooks", "pre-push");
+  if (!existsSync(hookPath)) {
+    console.log("agent-sync: no pre-push hook installed.");
+    return;
+  }
+  const content = readFileSync(hookPath, "utf8");
+  if (!content.includes("AGENT_SYNC_HOOK=pre-push")) {
+    throw new Error(`pre-push hook was not installed by agent-sync: ${hookPath}`);
+  }
+  unlinkSync(hookPath);
+  console.log(`agent-sync: removed pre-push hook at ${hookPath}`);
 }
 
 function commitStoreCleanup(config, archivedPruned, manifestPruned, foreignPruned) {
