@@ -26,6 +26,7 @@ const claudeB = join(base, "claude-b");
 const windowsRoot = `C:\\Users\\woodq\\FullStack\\${projectName}`;
 const pushMessage = "feat: add user login API";
 const conversationAtMs = Date.parse("2026-05-23T02:14:00.000Z");
+const olderConversationAtMs = Date.parse("2026-05-21T02:14:00.000Z");
 
 mkdirSync(machineA, { recursive: true });
 mkdirSync(machineBParent, { recursive: true });
@@ -40,6 +41,7 @@ mkdirSync(claudeA, { recursive: true });
 mkdirSync(claudeB, { recursive: true });
 mkdirSync(join(codexA, "archived_sessions"), { recursive: true });
 mkdirSync(join(codexA, "2026", "05", "21"), { recursive: true });
+mkdirSync(join(codexA, "2026", "05", "20"), { recursive: true });
 
 run("git", ["init", "--bare", "-b", "main", bareProjectRemote], base);
 run("git", ["init", "--bare", "-b", "main", bareStoreRemote], base);
@@ -59,6 +61,7 @@ run("git", ["push"], projectA);
 const currentCommit = run("git", ["rev-parse", "HEAD"], projectA);
 
 const sessionPath = join(codexA, "2026", "05", "21", "session.jsonl");
+const olderSessionPath = join(codexA, "2026", "05", "20", "older-session.jsonl");
 const foreignSessionPath = join(codexA, "2026", "05", "21", "foreign-session.jsonl");
 const archivedPath = join(codexA, "archived_sessions", "archived-session.jsonl");
 writeJsonl(sessionPath, [
@@ -89,7 +92,23 @@ writeJsonl(sessionPath, [
   }
 ]);
 writeCodexState(codexA, [
-  ["session-current", "Continue e2e session", "Preview should not win", "First message should not win", conversationAtMs - 3600000, conversationAtMs]
+  ["session-current", "Continue e2e session", "Preview should not win", "First message should not win", conversationAtMs - 3600000, conversationAtMs],
+  ["session-older", "Older e2e session", "Older preview should not win", "Older first message should not win", olderConversationAtMs - 3600000, olderConversationAtMs]
+]);
+writeJsonl(olderSessionPath, [
+  {
+    type: "session_meta",
+    payload: {
+      id: "session-older",
+      cwd: windowsRoot,
+      git: {
+        commit_hash: currentCommit,
+        branch: "main",
+        repository_url: bareProjectRemote
+      }
+    }
+  },
+  { type: "turn_context", payload: { cwd: windowsRoot } }
 ]);
 writeJsonl(foreignSessionPath, [
   {
@@ -131,7 +150,7 @@ writeJsonl(archivedPath, [
 ]);
 
 const pushOut = agent(projectA, codexA, claudeA, ["push", "--m", pushMessage]);
-assert.match(pushOut, /1 matched session file\(s\), 1 new binding\(s\)/);
+assert.match(pushOut, /2 matched session file\(s\), 2 new binding\(s\)/);
 assert.match(pushOut, /archived removed/);
 assert.equal(run("git", ["status", "--porcelain", "--", ".agent-sync-store"], projectA), "");
 assert.equal(run("git", ["status", "--porcelain"], projectA), "");
@@ -144,7 +163,7 @@ seedForeignStoreProject(base, bareStoreRemote);
 run("git", ["clone", bareProjectRemote, projectB], machineBParent);
 agent(projectB, codexB, claudeB, ["init", "--remote", bareStoreRemote]);
 const pullOut = agent(projectB, codexB, claudeB, ["pull"]);
-assert.match(pullOut, /1 session file\(s\) available for restore/);
+assert.match(pullOut, /2 session file\(s\) available for restore/);
 const sparseConfig = run("git", ["config", "--get", "core.sparseCheckout"], join(projectB, ".agent-sync-store"));
 const sparsePatterns = readFileSync(join(projectB, ".agent-sync-store", ".git", "info", "sparse-checkout"), "utf8");
 assert.equal(sparseConfig, "true");
@@ -157,17 +176,19 @@ const byLatest = JSON.parse(agent(projectB, codexB, claudeB, ["log", "--latest",
 const byCurrent = JSON.parse(agent(projectB, codexB, claudeB, ["log", "--current", "--json"]));
 const byBranch = JSON.parse(agent(projectB, codexB, claudeB, ["log", "--branch", "main", "--json"]));
 const byCommit = JSON.parse(agent(projectB, codexB, claudeB, ["log", "--commit", currentCommit.slice(0, 8), "--json"]));
-assert.equal(byLatest.length, 1);
-assert.equal(byCurrent.length, 1);
-assert.equal(byBranch.length, 1);
-assert.equal(byCommit.length, 1);
+assert.equal(byLatest.length, 2);
+assert.equal(byCurrent.length, 2);
+assert.equal(byBranch.length, 2);
+assert.equal(byCommit.length, 2);
 assert.equal(existsSync(join(projectB, ".agent-sync-store", "projects", byCurrent[0].projectId, "bindings.idx.json")), true);
 assert.equal(byCurrent[0].title, "Continue e2e session");
+assert.equal(byCurrent[1].title, "Older e2e session");
 assert.equal(byCurrent[0].projectCommit, currentCommit);
 assert.equal(byCurrent[0].commitMessage, pushMessage);
 assert.equal(byCurrent[0].authorName, "Agent Sync Test");
 assert.equal(byCurrent[0].authorEmail, "test@example.invalid");
 assert.equal(byCurrent[0].conversationAt, new Date(conversationAtMs).toISOString());
+assert.equal(byCurrent[1].conversationAt, new Date(olderConversationAtMs).toISOString());
 assert.match(readFileSync(join(projectB, ".agent-sync-store", byCurrent[0].storeRelativePath), "utf8"), /session-current/);
 
 const defaultLogOut = agent(projectB, codexB, claudeB, ["log"]);
@@ -178,8 +199,27 @@ assert.match(defaultLogOut, /Date:\s+Sat May 23 10:14:00 2026 \+0800/);
 assert.match(defaultLogOut, new RegExp(`\\s{4}${pushMessage}`));
 assert.match(defaultLogOut, /restore:\s+git agent-sync restore --index <index>/);
 assert.match(defaultLogOut, /Restore: git agent-sync restore --index 1/);
+assert.match(defaultLogOut, /Index: 2/);
+assert.match(defaultLogOut, /Title: Older e2e session/);
+const onelineOut = agent(projectB, codexB, claudeB, ["log", "--oneline"]);
+assert.deepEqual(onelineOut.split(/\r?\n/), [
+  `1  Continue e2e session  ${pushMessage}`,
+  `2  Older e2e session  ${pushMessage}`
+]);
+assert.doesNotMatch(onelineOut, /bindings:/);
+assert.match(agent(projectB, codexB, claudeB, ["log", "-n", "1"]), /Title: Continue e2e session/);
+assert.doesNotMatch(agent(projectB, codexB, claudeB, ["log", "-n", "1"]), /Title: Older e2e session/);
+assert.equal(agent(projectB, codexB, claudeB, ["log", "-1", "--oneline"]), `1  Continue e2e session  ${pushMessage}`);
+assert.equal(agent(projectB, codexB, claudeB, ["log", "--max-count=1", "--oneline"]), `1  Continue e2e session  ${pushMessage}`);
+assert.equal(agent(projectB, codexB, claudeB, ["log", "--branch", "main", "-1", "--oneline"]), `1  Continue e2e session  ${pushMessage}`);
+const limitedJson = JSON.parse(agent(projectB, codexB, claudeB, ["log", "--json", "-1"]));
+assert.equal(limitedJson.length, 1);
+assert.equal(limitedJson[0].title, "Continue e2e session");
+const badLogCount = agentResult(projectB, codexB, claudeB, ["log", "-n", "0"]);
+assert.notEqual(badLogCount.status, 0);
+assert.match(badLogCount.stderr, /log count must be a positive number/);
 const allJson = JSON.parse(agent(projectB, codexB, claudeB, ["log", "--json"]));
-assert.equal(allJson.length, 1);
+assert.equal(allJson.length, 2);
 assert.equal(allJson[0].bundleId, byCurrent[0].bundleId);
 
 const logOut = agent(projectB, codexB, claudeB, ["log", "--current"]);
@@ -201,9 +241,9 @@ assert.match(agent(projectB, codexB, claudeB, ["restore", "--latest", "1"]), /re
 assert.match(agent(projectB, codexB, claudeB, ["restore", "--current", "1"]), /restored codex:/);
 assert.match(agent(projectB, codexIndex, claudeB, ["restore", "--index", "1"]), /restored codex:/);
 assert.match(agent(projectB, codexShortIndex, claudeB, ["restore", "--i", "1"]), /restored codex:/);
-const badIndex = agentResult(projectB, codexB, claudeB, ["restore", "--index", "2"]);
+const badIndex = agentResult(projectB, codexB, claudeB, ["restore", "--index", "3"]);
 assert.notEqual(badIndex.status, 0);
-assert.match(badIndex.stderr, /restore index 2 is out of range for log \(1 binding\(s\)\)/);
+assert.match(badIndex.stderr, /restore index 3 is out of range for log \(2 binding\(s\)\)/);
 assert.match(agent(projectB, codexBranch, claudeB, ["restore", "--branch", "main"]), /restored codex:/);
 assert.match(agent(projectB, codexCommit, claudeB, ["restore", "--commit", currentCommit.slice(0, 8)]), /restored codex:/);
 const restored = parseJsonl(readFileSync(join(codexB, "2026", "05", "21", "session.jsonl"), "utf8"));
@@ -231,8 +271,8 @@ assert.match(agent(projectB, codexNoRegister, claudeB, ["restore", "--current", 
 assert.equal(existsSync(join(codexNoRegister, "state_5.sqlite")), false);
 
 const doctor = agent(projectB, codexB, claudeB, ["doctor"]);
-assert.match(doctor, /ok\s+manifest\s+1 match\(es\)/);
-assert.match(doctor, /ok\s+bindings\s+1 valid, 0 invalid/);
+assert.match(doctor, /ok\s+manifest\s+2 match\(es\)/);
+assert.match(doctor, /ok\s+bindings\s+2 valid, 0 invalid/);
 assert.match(doctor, /ok\s+store sparse\s+enabled/);
 assert.match(doctor, /archived skipped/);
 

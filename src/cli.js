@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import {
   CACHE_FILE,
   CONFIG_DIR,
@@ -91,7 +92,7 @@ function printHelp(command = null) {
 Usage:
   git agent-sync init [--remote <url>|<url>] [--store <path>]
   git agent-sync status [--json]
-  git agent-sync log [--latest|--current|--branch <name>|--commit <sha>] [--json]
+  git agent-sync log [--latest|--current|--branch <name>|--commit <sha>] [--oneline] [-n <count>|-<count>] [--json]
   git agent-sync show <bundle-id>|--latest <index>|--current <index>|--branch <name> <index>|--commit <sha> <index> [--json]
   git agent-sync push [--m <message>]
   git agent-sync pull
@@ -133,20 +134,25 @@ Scans local Codex sessions and reports which files match this Git project.`,
 
 Alias of status. Scans local Codex sessions without pushing.`,
     log: `Usage:
-  git agent-sync log [--json]
-  git agent-sync log --latest [--json]
-  git agent-sync log --current [--json]
-  git agent-sync log --branch <name> [--json]
-  git agent-sync log --commit <sha> [--json]
+  git agent-sync log [--oneline] [-n <count>|-<count>] [--json]
+  git agent-sync log --latest [--oneline] [-n <count>|-<count>] [--json]
+  git agent-sync log --current [--oneline] [-n <count>|-<count>] [--json]
+  git agent-sync log --branch <name> [--oneline] [-n <count>|-<count>] [--json]
+  git agent-sync log --commit <sha> [--oneline] [-n <count>|-<count>] [--json]
 
 Browses recoverable Codex conversations.
 Aligns with: git log.
 Default Index values can be restored with git agent-sync restore --index <n>.
+Uses a pager for long human-readable output when run in an interactive terminal.
 Selectors:
   --latest       most recent sidecar sync batch
   --current      current project HEAD commit
   --branch name  branch label recorded during sync
-  --commit sha   project commit recorded during sync`,
+  --commit sha   project commit recorded during sync
+Formats:
+  --oneline      print one conversation per line
+  -n count       limit output to count conversations
+  -count         shorthand for -n count`,
     show: `Usage:
   git agent-sync show <bundle-id> [--json]
   git agent-sync show --latest <index> [--json]
@@ -260,14 +266,14 @@ function scanCommand(gitRoot, options) {
 function logCommand(gitRoot, options) {
   const config = readConfigWithBundle(gitRoot);
   const selector = parseSelector(options, { requireSelector: false });
-  const bindings = selector ? queryBindings(config, selector, gitRoot) : readAllBindings(config);
+  const bindings = limitBindings(selector ? queryBindings(config, selector, gitRoot) : readAllBindings(config), options);
 
   if (options.json) {
     console.log(JSON.stringify(bindings, null, 2));
     return;
   }
 
-  printBindings(config, bindings, selector);
+  pageOrPrint(renderBindings(config, bindings, selector, options));
 }
 
 function showCommand(gitRoot, args, options) {
@@ -641,38 +647,99 @@ function printScan(scan, config) {
   }
 }
 
-function printBindings(config, bindings, selector) {
+function limitBindings(bindings, options) {
+  const maxCount = parseMaxCount(options);
+  return maxCount ? bindings.slice(0, maxCount) : bindings;
+}
+
+function parseMaxCount(options) {
+  const value = options.maxCount;
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (!/^\d+$/.test(String(value)) || Number(value) < 1) {
+    throw new Error("log count must be a positive number");
+  }
+  return Number(value);
+}
+
+function renderBindings(config, bindings, selector, options = {}) {
+  return options.oneline
+    ? renderBindingsOneline(config, bindings)
+    : renderBindingsFull(config, bindings, selector);
+}
+
+function renderBindingsOneline(config, bindings) {
   const titles = loadCodexSessionTitles();
+  return bindings.map((binding, index) => {
+    const title = getBindingTitle(config, binding, titles);
+    const message = binding.commitMessage || fallbackBindingCommitMessage(config, binding);
+    return `${index + 1}  ${title}  ${message}`;
+  }).join("\n");
+}
+
+function renderBindingsFull(config, bindings, selector) {
+  const titles = loadCodexSessionTitles();
+  const lines = [];
   if (selector) {
-    console.log(`selector: ${formatSelector(selector)}`);
-    console.log(`bindings: ${bindings.length}`);
-    console.log(`restore:  git agent-sync restore ${formatSelectorForCommand(selector)} <index>`);
-    console.log(`show:     git agent-sync show ${formatSelectorForCommand(selector)} <index>`);
-    console.log("");
+    lines.push(`selector: ${formatSelector(selector)}`);
+    lines.push(`bindings: ${bindings.length}`);
+    lines.push(`restore:  git agent-sync restore ${formatSelectorForCommand(selector)} <index>`);
+    lines.push(`show:     git agent-sync show ${formatSelectorForCommand(selector)} <index>`);
+    lines.push("");
   } else {
-    console.log(`bindings: ${bindings.length}`);
-    console.log("restore:  git agent-sync restore --index <index>");
-    console.log("show:     git agent-sync show <bundle-id>");
-    console.log("");
+    lines.push(`bindings: ${bindings.length}`);
+    lines.push("restore:  git agent-sync restore --index <index>");
+    lines.push("show:     git agent-sync show <bundle-id>");
+    lines.push("");
   }
   bindings.forEach((binding, index) => {
     const title = getBindingTitle(config, binding, titles);
     if (index > 0) {
-      console.log("");
+      lines.push("");
     }
-    console.log(`Index: ${index + 1}`);
-    console.log(`Title: ${title}`);
-    console.log(`Author: ${binding.authorName || "agent-sync"} <${binding.authorEmail || "agent-sync@example.invalid"}>`);
-    console.log(`Date:   ${formatGitDate(binding.conversationAt || binding.syncedAt || binding.boundAt)}`);
-    console.log("");
-    console.log(`    ${binding.commitMessage || fallbackBindingCommitMessage(config, binding)}`);
-    console.log("");
-    console.log(`    Bundle: ${binding.bundleId}`);
+    lines.push(`Index: ${index + 1}`);
+    lines.push(`Title: ${title}`);
+    lines.push(`Author: ${binding.authorName || "agent-sync"} <${binding.authorEmail || "agent-sync@example.invalid"}>`);
+    lines.push(`Date:   ${formatGitDate(binding.conversationAt || binding.syncedAt || binding.boundAt)}`);
+    lines.push("");
+    lines.push(`    ${binding.commitMessage || fallbackBindingCommitMessage(config, binding)}`);
+    lines.push("");
+    lines.push(`    Bundle: ${binding.bundleId}`);
     if (!selector) {
-      console.log(`    Restore: git agent-sync restore --index ${index + 1}`);
-      console.log(`    Show:    git agent-sync show ${binding.bundleId}`);
+      lines.push(`    Restore: git agent-sync restore --index ${index + 1}`);
+      lines.push(`    Show:    git agent-sync show ${binding.bundleId}`);
     }
   });
+  return lines.join("\n");
+}
+
+function pageOrPrint(text) {
+  if (!text) {
+    console.log("");
+    return;
+  }
+  if (!shouldUsePager(text)) {
+    console.log(text);
+    return;
+  }
+  const pager = process.env.GIT_PAGER || process.env.PAGER || "less";
+  const result = spawnSync(pager, ["-R"], {
+    input: text,
+    stdio: ["pipe", "inherit", "inherit"],
+    shell: true
+  });
+  if (result.error || result.status !== 0) {
+    console.log(text);
+  }
+}
+
+function shouldUsePager(text) {
+  if (!process.stdout.isTTY) {
+    return false;
+  }
+  const rows = process.stdout.rows || 24;
+  return text.split(/\r?\n/).length > rows;
 }
 
 function printBindingDetail(config, binding) {

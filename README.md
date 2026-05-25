@@ -95,8 +95,8 @@ git agent-sync uninstall-hooks
 ```bash
 git agent-sync init [--remote <url>|<url>] [--store <path>]
 git agent-sync status [--json]
-git agent-sync log [--json]
-git agent-sync log --latest [--json]
+git agent-sync log [--oneline] [-n <count>|-<count>] [--json]
+git agent-sync log --latest [--oneline] [-n <count>|-<count>] [--json]
 git agent-sync log --current [--json]
 git agent-sync log --branch <name> [--json]
 git agent-sync log --commit <sha> [--json]
@@ -183,6 +183,16 @@ git agent-sync show --latest 1
 ```
 
 Human-readable output is conversation-first and Git-log-like: it shows `Index`, `Title`, `Author`, `Date`, and the sync message. `Date` is the Codex conversation time when available, falling back to session file time. `--json` keeps returning the raw machine-readable bindings.
+
+For compact or limited output:
+
+```bash
+git agent-sync log --oneline
+git agent-sync log -n 3
+git agent-sync log -3
+```
+
+When human-readable output is longer than the terminal, Agent-Sync opens the configured pager (`GIT_PAGER`, `PAGER`, or `less`). In `less`, press Space for the next page, `b` for the previous page, and `q` to exit.
 
 The default log index is directly restorable:
 

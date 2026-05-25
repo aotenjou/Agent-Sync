@@ -118,8 +118,8 @@ git agent-sync uninstall-hooks
 ```bash
 git agent-sync init [--remote <url>|<url>] [--store <path>]
 git agent-sync status [--json]
-git agent-sync log [--json]
-git agent-sync log --latest [--json]
+git agent-sync log [--oneline] [-n <count>|-<count>] [--json]
+git agent-sync log --latest [--oneline] [-n <count>|-<count>] [--json]
 git agent-sync log --current [--json]
 git agent-sync log --branch <name> [--json]
 git agent-sync log --commit <sha> [--json]
@@ -208,6 +208,16 @@ git agent-sync show --latest 1
 ```
 
 普通输出以对话为主，类似 `git log` 显示 `Index`、`Title`、`Author`、`Date` 和同步说明。`Date` 优先使用 Codex 对话时间，拿不到时再回退到 session 文件时间。`--json` 会保留机器可读的原始 binding 列表。
+
+可以使用简洁或限制数量输出：
+
+```bash
+git agent-sync log --oneline
+git agent-sync log -n 3
+git agent-sync log -3
+```
+
+当 human 输出超过终端高度时，Agent-Sync 会打开配置的 pager（`GIT_PAGER`、`PAGER`，否则用 `less`）。在 `less` 里按 Space 向下翻页，按 `b` 向上翻页，按 `q` 退出。
 
 默认 `log` 里的编号可以直接用来恢复：
 

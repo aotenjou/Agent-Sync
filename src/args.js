@@ -13,6 +13,14 @@ export function parseArgs(rawArgs) {
       options.help = true;
     } else if (arg === "--json") {
       options.json = true;
+    } else if (arg === "--oneline") {
+      options.oneline = true;
+    } else if (arg === "-n" || arg === "--max-count") {
+      options.maxCount = rawArgs[++i];
+    } else if (arg.startsWith("--max-count=")) {
+      options.maxCount = arg.slice("--max-count=".length);
+    } else if (/^-\d+$/.test(arg)) {
+      options.maxCount = arg.slice(1);
     } else if (arg === "--all") {
       options.all = true;
     } else if (arg === "--latest") {

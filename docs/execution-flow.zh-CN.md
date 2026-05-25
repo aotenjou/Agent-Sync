@@ -188,6 +188,9 @@ git agent-sync pull
 
 ```bash
 git agent-sync log
+git agent-sync log --oneline
+git agent-sync log -n 3
+git agent-sync log -3
 git agent-sync log --latest
 git agent-sync log --current
 git agent-sync log --branch main
@@ -202,6 +205,8 @@ git agent-sync log --commit 4f7c2a1
 - `--current` 先匹配当前业务项目 `HEAD` commit；如果没有结果，再回退到当前 branch。
 - 不带 selector 的 `log` 会按对话时间由近及远列出全部对话。
 - 普通输出类似 `git log`，显示 `Index`、`Title`、`Author`、`Date` 和同步说明；`Date` 优先使用 Codex 对话时间。
+- `--oneline` 每条对话只输出一行；`-n <count>`、`--max-count <count>` 或 `-<count>` 会限制最近 N 条。
+- human 输出超过终端高度时会使用 pager；在 `less` 中 Space 向下翻页，`b` 向上翻页，`q` 退出。
 - 默认 `log` 输出中的 `Index` 可以直接用 `git agent-sync restore --index <n>` 或 `git agent-sync restore --i <n>` 恢复。
 - `git agent-sync push --m "message"` 可以指定本次对话同步说明；`--json` 保持输出原始 binding 列表。
 
