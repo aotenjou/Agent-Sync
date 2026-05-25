@@ -139,6 +139,7 @@ git agent-sync restore --branch <name> 1
 git agent-sync restore --commit <sha>
 git agent-sync restore --commit <sha> 1
 git agent-sync restore --current --no-adapt
+git agent-sync restore --current --no-register
 git agent-sync install-hooks
 git agent-sync uninstall-hooks
 git agent-sync doctor
@@ -230,12 +231,19 @@ Codex session 文件里可能记录创建会话时的 shell、工作目录和项
 - transcript 字符串、命令参数、命令输出、sandbox 元数据、已编辑文件列表里的源项目根路径引用会映射为当前业务仓库根目录。
 - 不会翻译命令语法。历史 PowerShell 命令仍然会作为历史 transcript 保留，但命令里嵌入的源项目路径会被映射为当前项目路径。
 - 恢复后的 Codex session 会在 `session_meta.payload` 写入 `agentSyncAdapted` 标记，方便后续审计。
+- 恢复后的 Codex session 会注册到本机 `state_5.sqlite` 和 `session_index.jsonl`，让 Codex 插件 / App 能在对话列表里显示。
 
 如果你需要完全按 sidecar 原文件恢复，不做任何本机适配：
 
 ```bash
 git agent-sync restore --current --no-adapt
 git agent-sync restore --commit 4f7c2a1 --no-adapt
+```
+
+如果只想恢复文件，不写入 Codex UI 索引：
+
+```bash
+git agent-sync restore --current --no-register
 ```
 
 ## 本地目录结构

@@ -95,7 +95,7 @@ Usage:
   git agent-sync push
   git agent-sync pull
   git agent-sync scan [--json]
-  git agent-sync restore <bundle-id>|--all|--latest|--current|--branch <name>|--commit <sha> [index|--index <n>] [--no-adapt]
+  git agent-sync restore <bundle-id>|--all|--latest|--current|--branch <name>|--commit <sha> [index|--index <n>] [--no-adapt] [--no-register]
   git agent-sync install-hooks
   git agent-sync uninstall-hooks
   git agent-sync doctor
@@ -164,14 +164,15 @@ Aligns with: git push. The sidecar commit records the current project HEAD commi
 Fast-forwards the sidecar repo from its remote.
 Run log or restore after pull to inspect or recover sessions.`,
     restore: `Usage:
-  git agent-sync restore <bundle-id> [--no-adapt]
-  git agent-sync restore --all [--no-adapt]
-  git agent-sync restore --latest [index|--index <n>] [--no-adapt]
-  git agent-sync restore --current [index|--index <n>] [--no-adapt]
-  git agent-sync restore --branch <name> [index|--index <n>] [--no-adapt]
-  git agent-sync restore --commit <sha> [index|--index <n>] [--no-adapt]
+  git agent-sync restore <bundle-id> [--no-adapt] [--no-register]
+  git agent-sync restore --all [--no-adapt] [--no-register]
+  git agent-sync restore --latest [index|--index <n>] [--no-adapt] [--no-register]
+  git agent-sync restore --current [index|--index <n>] [--no-adapt] [--no-register]
+  git agent-sync restore --branch <name> [index|--index <n>] [--no-adapt] [--no-register]
+  git agent-sync restore --commit <sha> [index|--index <n>] [--no-adapt] [--no-register]
 
 Restores selected Codex snapshots into the local Codex sessions directory.
+By default Codex restores are registered in state_5.sqlite/session_index.jsonl.
 Aligns with: git restore/checkout for local working context.`,
     "install-hooks": `Usage:
   git agent-sync install-hooks

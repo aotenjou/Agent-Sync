@@ -162,6 +162,7 @@ assert.match(agent(projectB, codexB, claudeB, ["show", byCurrent[0].bundleId]), 
 
 const restoreOut = agent(projectB, codexB, claudeB, ["restore", "--current"]);
 assert.match(restoreOut, /restored codex:/);
+assert.match(restoreOut, /registered codex thread: session-current/);
 assert.match(agent(projectB, codexB, claudeB, ["restore", "--latest", "1"]), /restored codex:/);
 assert.match(agent(projectB, codexB, claudeB, ["restore", "--current", "1"]), /restored codex:/);
 assert.match(agent(projectB, codexBranch, claudeB, ["restore", "--branch", "main"]), /restored codex:/);
@@ -174,6 +175,21 @@ assert.equal(args.workdir, projectB);
 assert.equal(args.shell, process.env.SHELL || "/bin/sh");
 assert.equal(args.cmd, `Get-ChildItem ${projectB}/src`);
 assert.ok(restored[0].payload.agentSyncAdapted);
+const restoredThread = readCodexThread(codexB, "session-current");
+assert.equal(restoredThread.rollout_path, join(codexB, "2026", "05", "21", "session.jsonl").replaceAll("\\", "/"));
+assert.equal(restoredThread.cwd, projectB);
+assert.equal(restoredThread.title, "Continue e2e session");
+assert.equal(restoredThread.git_sha, currentCommit);
+assert.equal(restoredThread.git_branch, "main");
+assert.equal(restoredThread.git_origin_url, bareProjectRemote);
+assert.equal(restoredThread.archived, 0);
+assert.equal(readCodexThreadCount(codexB, "session-current"), 1);
+assert.match(readFileSync(join(codexB, "session_index.jsonl"), "utf8"), /Continue e2e session/);
+
+const codexNoRegister = join(base, "codex-no-register");
+mkdirSync(codexNoRegister, { recursive: true });
+assert.match(agent(projectB, codexNoRegister, claudeB, ["restore", "--current", "1", "--no-register"]), /restored codex:/);
+assert.equal(existsSync(join(codexNoRegister, "state_5.sqlite")), false);
 
 const doctor = agent(projectB, codexB, claudeB, ["doctor"]);
 assert.match(doctor, /ok\s+manifest\s+1 match\(es\)/);
@@ -229,6 +245,36 @@ con.commit()
   if (result.status !== 0) {
     throw new Error(result.stderr || "failed to create fake Codex state");
   }
+}
+
+function readCodexThread(codexHome, id) {
+  const result = spawnSync("python3", ["-", join(codexHome, "state_5.sqlite"), id], {
+    input: `import json, sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.row_factory = sqlite3.Row
+row = con.execute("select * from threads where id = ?", (sys.argv[2],)).fetchone()
+print(json.dumps(dict(row), ensure_ascii=False) if row else "{}")
+`,
+    encoding: "utf8"
+  });
+  if (result.status !== 0) {
+    throw new Error(result.stderr || "failed to read fake Codex state");
+  }
+  return JSON.parse(result.stdout);
+}
+
+function readCodexThreadCount(codexHome, id) {
+  const result = spawnSync("python3", ["-", join(codexHome, "state_5.sqlite"), id], {
+    input: `import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+print(con.execute("select count(*) from threads where id = ?", (sys.argv[2],)).fetchone()[0])
+`,
+    encoding: "utf8"
+  });
+  if (result.status !== 0) {
+    throw new Error(result.stderr || "failed to count fake Codex state");
+  }
+  return Number(result.stdout.trim());
 }
 
 function parseJsonl(content) {

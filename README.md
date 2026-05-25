@@ -116,6 +116,7 @@ git agent-sync restore --branch <name> 1
 git agent-sync restore --commit <sha>
 git agent-sync restore --commit <sha> 1
 git agent-sync restore --current --no-adapt
+git agent-sync restore --current --no-register
 git agent-sync install-hooks
 git agent-sync uninstall-hooks
 git agent-sync doctor
@@ -205,12 +206,19 @@ By default, `restore` keeps the sidecar source file unchanged and adapts only th
 - Source project-root path references inside transcript strings, command arguments, outputs, sandbox metadata, and edited-file lists are mapped to the current project root.
 - Command syntax is not translated. A historical PowerShell command remains a PowerShell command in the transcript, but any embedded source project path is remapped.
 - Restored Codex sessions get an `agentSyncAdapted` marker in `session_meta.payload` for auditability.
+- Restored Codex sessions are registered in local `state_5.sqlite` and `session_index.jsonl`, so the Codex plugin/App can show them.
 
 To restore the exact sidecar file without any local adaptation:
 
 ```bash
 git agent-sync restore --current --no-adapt
 git agent-sync restore --commit 4f7c2a1 --no-adapt
+```
+
+To restore the file without registering it in the Codex UI index:
+
+```bash
+git agent-sync restore --current --no-register
 ```
 
 ## Local Files

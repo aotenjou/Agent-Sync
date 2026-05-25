@@ -21,6 +21,8 @@ export function parseArgs(rawArgs) {
       options.current = true;
     } else if (arg === "--no-adapt") {
       options.noAdapt = true;
+    } else if (arg === "--no-register") {
+      options.noRegister = true;
     } else if (arg.startsWith("--index=")) {
       options.index = arg.slice("--index=".length);
     } else if (arg === "--index") {

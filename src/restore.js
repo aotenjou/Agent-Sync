@@ -4,7 +4,7 @@ import { getAgentRoot } from "./agents.js";
 import { queryBindings } from "./bindings.js";
 import { parseSelector, formatSelector } from "./args.js";
 import { findProjectBundle } from "./store.js";
-import { adaptCodexSessionContent, getCodexContentProjectMatch } from "./codex-session.js";
+import { adaptCodexSessionContent, getCodexContentProjectMatch, registerRestoredCodexSession } from "./codex-session.js";
 import { expandHome, readJson, writeFileAtomic } from "./utils.js";
 
 export function restoreCommand(gitRoot, args, options, config) {
@@ -80,6 +80,7 @@ function restoreMatches(config, matches, options = {}) {
       ? ` (adapted ${result.fromPlatform} -> ${result.toPlatform}, shell ${result.shell})`
       : "";
     console.log(`restored ${match.agent}: ${target}${suffix}`);
+    registerRestoredSession(config, match, target, result.content, options);
   }
 }
 
@@ -91,16 +92,16 @@ function getRestoreTarget(match) {
 }
 
 function restoreSessionFile(config, match, source, target, options) {
+  const originalContent = shouldAdaptSessionFile(match, source) ? readFileSync(source, "utf8") : null;
   if (options.noAdapt || !shouldAdaptSessionFile(match, source)) {
     copyFileSync(source, target);
-    return { adapted: false };
+    return { adapted: false, content: originalContent };
   }
 
-  const content = readFileSync(source, "utf8");
-  const result = adaptCodexSessionContent(content, config);
+  const result = adaptCodexSessionContent(originalContent, config);
   if (!result.adapted) {
     copyFileSync(source, target);
-    return { adapted: false };
+    return { adapted: false, content: originalContent };
   }
 
   writeFileAtomic(target, result.content);
@@ -121,4 +122,16 @@ function getRestoreProjectMatch(config, match, source) {
   } catch (error) {
     return { matched: false, reason: `unreadable session (${error.message})` };
   }
+}
+
+function registerRestoredSession(config, match, target, content, options) {
+  if (options.noRegister || match.agent !== "codex" || !content) {
+    return;
+  }
+  const result = registerRestoredCodexSession(content, target, config, match, getAgentRoot("codex"));
+  if (result.registered) {
+    console.log(`registered codex thread: ${result.sessionId}`);
+    return;
+  }
+  console.log(`warn: restored file but failed to register Codex thread (${result.reason})`);
 }

@@ -227,6 +227,7 @@ Codex session 默认会在恢复时做轻量跨平台适配：
 - 把源机器项目根路径映射为当前业务仓库根路径。
 - 把 Windows shell 与 POSIX shell 做安全切换。
 - 修正 `cwd`、`workdir`、结构化命令参数、transcript 和已编辑文件列表里的项目路径。
+- 写入本机 `state_5.sqlite` 和 `session_index.jsonl`，让 Codex 插件 / App 能显示恢复后的会话。
 - 不修改 sidecar store 中的原始 session 文件。
 - 不翻译 PowerShell / bash / zsh 命令语法。
 
@@ -234,6 +235,12 @@ Codex session 默认会在恢复时做轻量跨平台适配：
 
 ```bash
 git agent-sync restore --current --no-adapt
+```
+
+如果只想恢复 JSONL 文件，不注册到 Codex UI 索引，可以使用：
+
+```bash
+git agent-sync restore --current --no-register
 ```
 
 ## 7. 诊断：检查整条链路是否健康

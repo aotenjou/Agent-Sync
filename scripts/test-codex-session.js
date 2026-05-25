@@ -13,7 +13,8 @@ import {
   isCodexSessionContentForProject,
   getCodexThreadArchiveInfo,
   loadCodexThreadIndex,
-  loadCodexSessionTitles
+  loadCodexSessionTitles,
+  registerRestoredCodexSession
 } from "../src/codex-session.js";
 
 const targetRoot = "/Users/test/workspace/MokioAgent";
@@ -215,6 +216,48 @@ const fallbackMetadata = extractCodexSessionMetadata([
 assert.equal(fallbackMetadata.title, "Updated JSONL title");
 assert.equal(cleanCodexTitle("</environment_context>"), null);
 
+const restoreHome = mkdtempSync(join(tmpdir(), "agent-sync-codex-restore-"));
+const restoreTarget = join(restoreHome, "sessions", "2026", "05", "21", "restore.jsonl");
+const restoreContent = makeSession({
+  name: "restore",
+  root: targetRoot,
+  shell: "zsh",
+  cmd: "pwd"
+});
+const restoreConfig = {
+  projectRoot: targetRoot,
+  projectName: "MokioAgent",
+  projectIdentity: "name:MokioAgent"
+};
+const restoreRegister = registerRestoredCodexSession(restoreContent, restoreTarget, restoreConfig, {
+  bundleId: "codex-restore",
+  title: "Restored title"
+}, join(restoreHome, "sessions"));
+assert.equal(restoreRegister.registered, true);
+const registeredThread = readCodexThread(restoreHome, "restore-session");
+assert.equal(registeredThread.rollout_path, restoreTarget.replaceAll("\\", "/"));
+assert.equal(registeredThread.cwd, targetRoot);
+assert.equal(registeredThread.title, "Restored title");
+assert.equal(registeredThread.archived, 0);
+assert.match(readFileSync(join(restoreHome, "session_index.jsonl"), "utf8"), /Restored title/);
+
+const minimalHome = mkdtempSync(join(tmpdir(), "agent-sync-codex-minimal-"));
+const minimalState = join(minimalHome, "state_5.sqlite");
+const minimalSqlite = spawnSync("python3", ["-", minimalState], {
+  input: `import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("create table threads (id text primary key, rollout_path text not null, title text not null)")
+con.commit()
+`,
+  encoding: "utf8"
+});
+if (minimalSqlite.status === 0) {
+  const minimalRegister = registerRestoredCodexSession(restoreContent, join(minimalHome, "sessions", "restore.jsonl"), restoreConfig, {}, join(minimalHome, "sessions"));
+  assert.equal(minimalRegister.registered, true);
+  const minimalThread = readCodexThread(minimalHome, "restore-session");
+  assert.equal(minimalThread.title, "Fix restore session");
+}
+
 console.log("codex session path adaptation test passed");
 
 function makeSession({ name, root, shell, cmd }) {
@@ -270,4 +313,20 @@ function makeSession({ name, root, shell, cmd }) {
 
 function parseJsonl(content) {
   return content.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function readCodexThread(codexHome, id) {
+  const result = spawnSync("python3", ["-", join(codexHome, "state_5.sqlite"), id], {
+    input: `import json, sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.row_factory = sqlite3.Row
+row = con.execute("select * from threads where id = ?", (sys.argv[2],)).fetchone()
+print(json.dumps(dict(row), ensure_ascii=False) if row else "{}")
+`,
+    encoding: "utf8"
+  });
+  if (result.status !== 0) {
+    throw new Error(result.stderr || "failed to read fake Codex state");
+  }
+  return JSON.parse(result.stdout);
 }

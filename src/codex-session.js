@@ -2,8 +2,8 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { expandHome, sha256, normalizePath, unique } from "./utils.js";
-import { normalizeRemoteUrl } from "./git.js";
+import { expandHome, sha256, normalizePath, unique, writeFileAtomic } from "./utils.js";
+import { getGitContext, getProjectRemote, normalizeRemoteUrl } from "./git.js";
 
 const codexStateCache = new Map();
 
@@ -171,6 +171,79 @@ export function cleanCodexTitle(value) {
   return cleanTitle(value);
 }
 
+export function registerRestoredCodexSession(content, targetPath, config, match = {}, codexRoot = null) {
+  const codexHome = resolveCodexHome(getCodexRestoreRoot(targetPath, codexRoot));
+  const metadata = extractCodexSessionMetadata(content);
+  const sessionId = metadata.sessionId || match.sessionId;
+  if (!sessionId) {
+    return { registered: false, reason: "missing session id" };
+  }
+
+  const gitContext = getRestoreGitContext(config.projectRoot);
+  const now = Date.now();
+  const title = chooseFirstTitle([match.title, metadata.title, match.bundleId]) || sessionId;
+  const firstUserMessage = extractFirstUserMessage(content) || title;
+  const sessionMeta = extractFirstSessionMeta(content);
+  const thread = {
+    id: sessionId,
+    rollout_path: normalizePath(targetPath),
+    created_at: getSessionCreatedAtSeconds(sessionMeta, now),
+    updated_at: Math.floor(now / 1000),
+    created_at_ms: getSessionCreatedAtMs(sessionMeta, now),
+    updated_at_ms: now,
+    source: sessionMeta.source || "vscode",
+    model_provider: sessionMeta.model_provider || sessionMeta.modelProvider || "OpenAI",
+    cwd: normalizePath(config.projectRoot),
+    title,
+    sandbox_policy: stringifyJsonValue(sessionMeta.sandbox_policy || sessionMeta.sandboxPolicy || { type: "danger-full-access" }),
+    approval_mode: sessionMeta.approval_mode || sessionMeta.approvalMode || "never",
+    tokens_used: Number(sessionMeta.tokens_used || sessionMeta.tokensUsed || 0),
+    has_user_event: 0,
+    archived: 0,
+    archived_at: null,
+    git_sha: gitContext.headCommit || null,
+    git_branch: gitContext.branch || null,
+    git_origin_url: getRestoreProjectRemote(config.projectRoot),
+    cli_version: sessionMeta.cli_version || sessionMeta.cliVersion || "",
+    first_user_message: firstUserMessage,
+    agent_nickname: sessionMeta.agent_nickname || sessionMeta.agentNickname || null,
+    agent_role: sessionMeta.agent_role || sessionMeta.agentRole || null,
+    memory_mode: sessionMeta.memory_mode || sessionMeta.memoryMode || "enabled",
+    model: sessionMeta.model || null,
+    reasoning_effort: sessionMeta.reasoning_effort || sessionMeta.reasoningEffort || null,
+    agent_path: sessionMeta.agent_path || sessionMeta.agentPath || null,
+    thread_source: sessionMeta.thread_source || sessionMeta.threadSource || null,
+    preview: firstUserMessage
+  };
+
+  const stateResult = upsertCodexThread(codexHome, thread);
+  if (!stateResult.ok) {
+    return { registered: false, reason: stateResult.message || stateResult.status || "state update failed", sessionId };
+  }
+
+  upsertCodexSessionIndex(codexHome, {
+    id: sessionId,
+    thread_name: title,
+    updated_at: new Date(now).toISOString()
+  });
+
+  codexStateCache.delete(normalizePath(join(codexHome, "state_5.sqlite")));
+  return { registered: true, sessionId, title, codexHome };
+}
+
+function getCodexRestoreRoot(targetPath, codexRoot) {
+  if (codexRoot) {
+    return codexRoot;
+  }
+  const normalized = normalizePath(targetPath);
+  const marker = "/sessions/";
+  const index = normalized.indexOf(marker);
+  if (index >= 0) {
+    return normalized.slice(0, index + marker.length - 1);
+  }
+  return dirname(targetPath);
+}
+
 export function resolveCodexHome(codexRoot = join(homedir(), ".codex")) {
   const normalized = normalizePath(codexRoot);
   const leaf = basename(normalized);
@@ -266,10 +339,154 @@ except Exception:
   return snapshot;
 }
 
+function upsertCodexThread(codexHome, thread) {
+  const statePath = join(codexHome, "state_5.sqlite");
+  const script = `import json, os, sqlite3, sys
+path = sys.argv[1]
+thread = json.loads(sys.stdin.read())
+os.makedirs(os.path.dirname(path), exist_ok=True)
+con = sqlite3.connect(path)
+cur = con.cursor()
+cur.execute("""CREATE TABLE IF NOT EXISTS threads (
+    id TEXT PRIMARY KEY,
+    rollout_path TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    model_provider TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    title TEXT NOT NULL,
+    sandbox_policy TEXT NOT NULL,
+    approval_mode TEXT NOT NULL,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    has_user_event INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    archived_at INTEGER,
+    git_sha TEXT,
+    git_branch TEXT,
+    git_origin_url TEXT,
+    cli_version TEXT NOT NULL DEFAULT '',
+    first_user_message TEXT NOT NULL DEFAULT '',
+    agent_nickname TEXT,
+    agent_role TEXT,
+    memory_mode TEXT NOT NULL DEFAULT 'enabled',
+    model TEXT,
+    reasoning_effort TEXT,
+    agent_path TEXT,
+    created_at_ms INTEGER,
+    updated_at_ms INTEGER,
+    thread_source TEXT,
+    preview TEXT NOT NULL DEFAULT ''
+)""")
+cols = [row[1] for row in cur.execute("pragma table_info(threads)")]
+write_cols = [col for col in cols if col in thread]
+if "id" not in write_cols:
+    raise RuntimeError("threads table has no id column")
+placeholders = ", ".join(["?"] * len(write_cols))
+insert_cols = ", ".join(write_cols)
+updates = ", ".join([f"{col}=excluded.{col}" for col in write_cols if col != "id"])
+sql = f"INSERT INTO threads ({insert_cols}) VALUES ({placeholders})"
+if updates:
+    sql += f" ON CONFLICT(id) DO UPDATE SET {updates}"
+values = [thread[col] for col in write_cols]
+cur.execute(sql, values)
+con.commit()
+`;
+  const result = runPythonSqliteWithInput(script, statePath, JSON.stringify(thread));
+  if (result.error) {
+    return { ok: false, status: "unavailable", message: result.error.message };
+  }
+  if (result.status !== 0) {
+    return { ok: false, status: `exit ${result.status}`, message: (result.stderr || result.stdout || "").trim() };
+  }
+  return { ok: true };
+}
+
+function upsertCodexSessionIndex(codexHome, entry) {
+  const indexPath = join(codexHome, "session_index.jsonl");
+  const existing = [];
+  if (existsSync(indexPath)) {
+    for (const line of readFileSync(indexPath, "utf8").split(/\r?\n/)) {
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        const item = JSON.parse(line);
+        if (item.id !== entry.id) {
+          existing.push(item);
+        }
+      } catch {
+        // Drop invalid local index lines while rebuilding the lightweight index.
+      }
+    }
+  }
+  existing.unshift(entry);
+  const content = `${existing.map((item) => JSON.stringify(item)).join("\n")}\n`;
+  writeFileAtomic(indexPath, content);
+}
+
+function extractFirstSessionMeta(content) {
+  for (const item of readJsonlItems(content)) {
+    if (item.type === "session_meta" && item.payload && typeof item.payload === "object") {
+      return item.payload;
+    }
+  }
+  return {};
+}
+
+function extractFirstUserMessage(content) {
+  for (const item of readJsonlItems(content)) {
+    const payload = item.payload;
+    if (item.type === "response_item" && payload?.type === "message" && payload.role === "user") {
+      const title = cleanTitle(getMessageText(payload));
+      if (title) {
+        return title;
+      }
+    }
+  }
+  return null;
+}
+
+function getSessionCreatedAtSeconds(sessionMeta, now) {
+  return Math.floor(getSessionCreatedAtMs(sessionMeta, now) / 1000);
+}
+
+function getSessionCreatedAtMs(sessionMeta, now) {
+  const timestamp = typeof sessionMeta.timestamp === "string" ? Date.parse(sessionMeta.timestamp) : NaN;
+  return Number.isFinite(timestamp) ? timestamp : now;
+}
+
+function getRestoreGitContext(gitRoot) {
+  try {
+    return getGitContext(gitRoot);
+  } catch {
+    return {
+      branch: null,
+      headCommit: null
+    };
+  }
+}
+
+function getRestoreProjectRemote(gitRoot) {
+  try {
+    return getProjectRemote(gitRoot) || null;
+  } catch {
+    return null;
+  }
+}
+
+function stringifyJsonValue(value) {
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
 function runPythonSqlite(script, statePath) {
+  return runPythonSqliteWithInput(script, statePath, "");
+}
+
+function runPythonSqliteWithInput(script, statePath, input) {
   for (const command of ["python3", "python"]) {
-    const result = spawnSync(command, ["-", statePath], {
-      input: script,
+    const result = spawnSync(command, ["-c", script, statePath], {
+      input,
       encoding: "utf8"
     });
     if (!result.error && result.status === 0) {
