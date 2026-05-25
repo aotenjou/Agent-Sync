@@ -33,6 +33,10 @@ export function parseArgs(rawArgs) {
       options.index = arg.slice("--index=".length);
     } else if (arg === "--index") {
       options.index = rawArgs[++i];
+    } else if (arg.startsWith("--i=")) {
+      options.index = arg.slice("--i=".length);
+    } else if (arg === "--i") {
+      options.index = rawArgs[++i];
     } else if (arg.startsWith("--branch=")) {
       options.branch = arg.slice("--branch=".length);
     } else if (arg === "--branch") {

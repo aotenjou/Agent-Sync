@@ -28,7 +28,8 @@ export function ensureStoreRepo(storePath, remote) {
   }
 }
 
-export function syncStoreFromRemote(storePath, remote) {
+export function syncStoreFromRemote(config) {
+  const { storePath, remote } = config;
   if (!remote) {
     return false;
   }
@@ -38,11 +39,15 @@ export function syncStoreFromRemote(storePath, remote) {
     return false;
   }
 
-  runGit(["fetch", "origin", DEFAULT_STORE_BRANCH], storePath);
+  const sparse = applyStoreSparseCheckout(config);
+  fetchStoreBranch(storePath);
   const branch = runGit(["rev-parse", "--verify", DEFAULT_STORE_BRANCH], storePath, { allowFail: true });
   if (branch.status !== 0) {
     removeBootstrapGitignore(storePath);
     runGit(["checkout", "-B", DEFAULT_STORE_BRANCH, `origin/${DEFAULT_STORE_BRANCH}`], storePath);
+    if (sparse.enabled) {
+      applyStoreSparseCheckout(config);
+    }
     return true;
   }
 
@@ -50,8 +55,70 @@ export function syncStoreFromRemote(storePath, remote) {
   if (upstream.status !== 0 || upstream.stdout.trim() !== `origin/${DEFAULT_STORE_BRANCH}`) {
     runGit(["branch", "--set-upstream-to", `origin/${DEFAULT_STORE_BRANCH}`, DEFAULT_STORE_BRANCH], storePath);
   }
-  runGit(["pull", "--ff-only"], storePath);
+  runGit(["merge", "--ff-only", `origin/${DEFAULT_STORE_BRANCH}`], storePath);
+  if (sparse.enabled) {
+    applyStoreSparseCheckout(config);
+  }
   return true;
+}
+
+function fetchStoreBranch(storePath) {
+  const filtered = runGit(["fetch", "--filter=blob:none", "origin", DEFAULT_STORE_BRANCH], storePath, { allowFail: true });
+  if (filtered.status === 0) {
+    runGit(["config", "remote.origin.promisor", "true"], storePath);
+    runGit(["config", "remote.origin.partialclonefilter", "blob:none"], storePath);
+    return true;
+  }
+  runGit(["fetch", "origin", DEFAULT_STORE_BRANCH], storePath);
+  runGit(["config", "--unset", "remote.origin.promisor"], storePath, { allowFail: true });
+  runGit(["config", "--unset", "remote.origin.partialclonefilter"], storePath, { allowFail: true });
+  return false;
+}
+
+export function applyStoreSparseCheckout(config) {
+  if (!config.remote || !existsSync(join(config.storePath, ".git"))) {
+    return { enabled: false, status: "disabled" };
+  }
+  const init = runGit(["sparse-checkout", "init", "--no-cone"], config.storePath, { allowFail: true });
+  if (init.status !== 0) {
+    return { enabled: false, status: "unsupported", message: (init.stderr || init.stdout || "").trim() };
+  }
+  const patterns = getStoreSparsePatterns(config);
+  const set = runGit(["sparse-checkout", "set", "--no-cone", ...patterns], config.storePath, { allowFail: true });
+  if (set.status !== 0) {
+    runGit(["sparse-checkout", "disable"], config.storePath, { allowFail: true });
+    return { enabled: false, status: "failed", message: (set.stderr || set.stdout || "").trim() };
+  }
+  return { enabled: true, status: "enabled", patterns };
+}
+
+export function getStoreSparseStatus(config) {
+  if (!existsSync(join(config.storePath, ".git"))) {
+    return { enabled: false, status: "missing" };
+  }
+  const sparse = getGitConfig(config.storePath, "core.sparseCheckout") === "true";
+  const cone = getGitConfig(config.storePath, "core.sparseCheckoutCone");
+  const filter = getGitConfig(config.storePath, "remote.origin.partialclonefilter") || "none";
+  return {
+    enabled: sparse,
+    status: sparse ? "enabled" : "disabled",
+    cone: cone || "unset",
+    filter
+  };
+}
+
+function getStoreSparsePatterns(config) {
+  const projectIds = unique([config.projectId, ...(config.legacyProjectIds || [])].filter(Boolean));
+  return [
+    "/.gitignore",
+    "/projects/*/manifest.json",
+    ...projectIds.map((projectId) => `/projects/${projectId}/**`)
+  ];
+}
+
+function getGitConfig(cwd, key) {
+  const result = runGit(["config", "--get", key], cwd, { allowFail: true });
+  return result.status === 0 ? result.stdout.trim() : null;
 }
 
 function removeBootstrapGitignore(storePath) {
@@ -303,10 +370,12 @@ export function pruneArchivedManifestEntries(config, archiveInfo) {
 export function adoptExistingProjectBundle(config) {
   const bundle = findProjectBundle(config);
   if (!bundle || bundle.projectId === config.projectId) {
+    applyStoreSparseCheckout(config);
     return;
   }
   config.projectId = bundle.projectId;
   config.legacyProjectIds = unique([...(config.legacyProjectIds || []), bundle.projectId]);
+  applyStoreSparseCheckout(config);
 }
 
 export function findProjectBundle(config) {

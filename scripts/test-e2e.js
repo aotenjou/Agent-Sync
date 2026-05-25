@@ -17,6 +17,8 @@ const projectA = join(machineA, projectName);
 const projectB = join(machineBParent, projectName);
 const codexA = join(base, "codex-a");
 const codexB = join(base, "codex-b");
+const codexIndex = join(base, "codex-index");
+const codexShortIndex = join(base, "codex-short-index");
 const codexBranch = join(base, "codex-branch");
 const codexCommit = join(base, "codex-commit");
 const claudeA = join(base, "claude-a");
@@ -30,6 +32,8 @@ mkdirSync(machineBParent, { recursive: true });
 mkdirSync(projectA, { recursive: true });
 mkdirSync(codexA, { recursive: true });
 mkdirSync(codexB, { recursive: true });
+mkdirSync(codexIndex, { recursive: true });
+mkdirSync(codexShortIndex, { recursive: true });
 mkdirSync(codexBranch, { recursive: true });
 mkdirSync(codexCommit, { recursive: true });
 mkdirSync(claudeA, { recursive: true });
@@ -135,11 +139,19 @@ assert.equal(run("git", ["ls-files", ".agent-sync-store"], projectA), "");
 assert.equal(run("git", ["grep", "-n", "Agent-Sync", "HEAD", "--", "projects"], join(projectA, ".agent-sync-store"), { allowFail: true }), "");
 assert.equal(run("git", ["log", "-1", "--pretty=%s"], join(projectA, ".agent-sync-store")), pushMessage);
 assert.equal(run("git", ["log", "-1", "--pretty=%an <%ae>"], join(projectA, ".agent-sync-store")), "Agent Sync Test <test@example.invalid>");
+seedForeignStoreProject(base, bareStoreRemote);
 
 run("git", ["clone", bareProjectRemote, projectB], machineBParent);
 agent(projectB, codexB, claudeB, ["init", "--remote", bareStoreRemote]);
 const pullOut = agent(projectB, codexB, claudeB, ["pull"]);
 assert.match(pullOut, /1 session file\(s\) available for restore/);
+const sparseConfig = run("git", ["config", "--get", "core.sparseCheckout"], join(projectB, ".agent-sync-store"));
+const sparsePatterns = readFileSync(join(projectB, ".agent-sync-store", ".git", "info", "sparse-checkout"), "utf8");
+assert.equal(sparseConfig, "true");
+assert.match(sparsePatterns, /\/projects\/\*\/manifest\.json/);
+assert.match(sparsePatterns, /\/projects\/agent-sync-e2e-project-/i);
+assert.equal(existsSync(join(projectB, ".agent-sync-store", "projects", "ForeignProject-deadbeef00", "manifest.json")), true);
+assert.equal(existsSync(join(projectB, ".agent-sync-store", "projects", "ForeignProject-deadbeef00", "codex", "codex-foreign.jsonl")), false);
 
 const byLatest = JSON.parse(agent(projectB, codexB, claudeB, ["log", "--latest", "--json"]));
 const byCurrent = JSON.parse(agent(projectB, codexB, claudeB, ["log", "--current", "--json"]));
@@ -164,7 +176,8 @@ assert.match(defaultLogOut, /Title: Continue e2e session/);
 assert.match(defaultLogOut, /Author: Agent Sync Test <test@example.invalid>/);
 assert.match(defaultLogOut, /Date:\s+Sat May 23 10:14:00 2026 \+0800/);
 assert.match(defaultLogOut, new RegExp(`\\s{4}${pushMessage}`));
-assert.match(defaultLogOut, new RegExp(`Restore: git agent-sync restore ${byCurrent[0].bundleId}`));
+assert.match(defaultLogOut, /restore:\s+git agent-sync restore --index <index>/);
+assert.match(defaultLogOut, /Restore: git agent-sync restore --index 1/);
 const allJson = JSON.parse(agent(projectB, codexB, claudeB, ["log", "--json"]));
 assert.equal(allJson.length, 1);
 assert.equal(allJson[0].bundleId, byCurrent[0].bundleId);
@@ -186,6 +199,11 @@ assert.match(restoreOut, /restored codex:/);
 assert.match(restoreOut, /registered codex thread: session-current/);
 assert.match(agent(projectB, codexB, claudeB, ["restore", "--latest", "1"]), /restored codex:/);
 assert.match(agent(projectB, codexB, claudeB, ["restore", "--current", "1"]), /restored codex:/);
+assert.match(agent(projectB, codexIndex, claudeB, ["restore", "--index", "1"]), /restored codex:/);
+assert.match(agent(projectB, codexShortIndex, claudeB, ["restore", "--i", "1"]), /restored codex:/);
+const badIndex = agentResult(projectB, codexB, claudeB, ["restore", "--index", "2"]);
+assert.notEqual(badIndex.status, 0);
+assert.match(badIndex.stderr, /restore index 2 is out of range for log \(1 binding\(s\)\)/);
 assert.match(agent(projectB, codexBranch, claudeB, ["restore", "--branch", "main"]), /restored codex:/);
 assert.match(agent(projectB, codexCommit, claudeB, ["restore", "--commit", currentCommit.slice(0, 8)]), /restored codex:/);
 const restored = parseJsonl(readFileSync(join(codexB, "2026", "05", "21", "session.jsonl"), "utf8"));
@@ -215,16 +233,29 @@ assert.equal(existsSync(join(codexNoRegister, "state_5.sqlite")), false);
 const doctor = agent(projectB, codexB, claudeB, ["doctor"]);
 assert.match(doctor, /ok\s+manifest\s+1 match\(es\)/);
 assert.match(doctor, /ok\s+bindings\s+1 valid, 0 invalid/);
+assert.match(doctor, /ok\s+store sparse\s+enabled/);
 assert.match(doctor, /archived skipped/);
 
 console.log(JSON.stringify({ base, currentCommit }, null, 2));
 
 function agent(cwd, codexDir, claudeDir, args) {
-  return run(process.execPath, [cli, ...args], cwd, {
+  return run(process.execPath, [cli, ...args], cwd, agentEnv(codexDir, claudeDir));
+}
+
+function agentResult(cwd, codexDir, claudeDir, args) {
+  return spawnSync(process.execPath, [cli, ...args], {
+    cwd,
+    env: { ...process.env, ...agentEnv(codexDir, claudeDir) },
+    encoding: "utf8"
+  });
+}
+
+function agentEnv(codexDir, claudeDir) {
+  return {
     AGENT_SYNC_CODEX_DIR: codexDir,
     AGENT_SYNC_CLAUDE_DIR: claudeDir,
     TZ: "Asia/Shanghai"
-  });
+  };
 }
 
 function run(command, args, cwd, env = {}) {
@@ -251,6 +282,58 @@ function run(command, args, cwd, env = {}) {
 function writeJsonl(path, items) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${items.map((item) => JSON.stringify(item)).join("\n")}\n`);
+}
+
+function seedForeignStoreProject(baseDir, remote) {
+  const seed = join(baseDir, "store-seed");
+  run("git", ["clone", remote, seed], baseDir);
+  run("git", ["config", "user.name", "Agent Sync Test"], seed);
+  run("git", ["config", "user.email", "test@example.invalid"], seed);
+  const projectDir = join(seed, "projects", "ForeignProject-deadbeef00");
+  mkdirSync(join(projectDir, "codex"), { recursive: true });
+  writeFileSync(join(projectDir, "manifest.json"), JSON.stringify({
+    projectId: "ForeignProject-deadbeef00",
+    projectName: "ForeignProject",
+    projectIdentity: "git:example.com/foreign/project",
+    matches: [{
+      agent: "codex",
+      bundleId: "codex-foreign",
+      storeRelativePath: "projects/ForeignProject-deadbeef00/codex/codex-foreign.jsonl",
+      originalPath: "~/.codex/sessions/foreign.jsonl"
+    }]
+  }, null, 2));
+  writeFileSync(join(projectDir, "bindings.jsonl"), `${JSON.stringify({
+    version: 2,
+    syncRunId: "foreign-run",
+    syncedAt: "2026-05-20T00:00:00.000Z",
+    projectId: "ForeignProject-deadbeef00",
+    projectIdentity: "git:example.com/foreign/project",
+    projectBranch: "main",
+    projectCommit: "foreign-commit",
+    bundleId: "codex-foreign",
+    agent: "codex",
+    sessionId: "foreign-session",
+    title: "Foreign session",
+    storeRelativePath: "projects/ForeignProject-deadbeef00/codex/codex-foreign.jsonl",
+    originalPath: "~/.codex/sessions/foreign.jsonl"
+  })}\n`);
+  writeJsonl(join(projectDir, "codex", "codex-foreign.jsonl"), [
+    {
+      type: "session_meta",
+      payload: {
+        id: "foreign-session",
+        cwd: "/tmp/foreign",
+        git: {
+          commit_hash: "foreign-commit",
+          branch: "main",
+          repository_url: "https://example.com/foreign/project.git"
+        }
+      }
+    }
+  ]);
+  run("git", ["add", "projects/ForeignProject-deadbeef00"], seed);
+  run("git", ["commit", "-m", "seed foreign project"], seed);
+  run("git", ["push", "origin", "main"], seed);
 }
 
 function writeCodexState(codexHome, rows) {

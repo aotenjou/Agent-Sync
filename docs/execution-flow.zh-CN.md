@@ -176,6 +176,7 @@ git agent-sync pull
 - 初始化本机 `.agent-sync/config.json`。
 - 初始化或更新本机 `.agent-sync-store/`。
 - 从私有 session store 远程仓库拉取 sidecar 数据。
+- 对 sidecar store 启用 sparse checkout，只完整展开当前项目目录，同时保留其他项目的 `manifest.json` 作为轻量索引。
 - 根据当前项目 identity、legacy id、项目名等信息找到兼容的 project bundle。
 - 清理该 bundle 中已经明确属于其他 Codex 项目的历史残留，避免旧版本误同步的数据继续被恢复。
 
@@ -201,6 +202,7 @@ git agent-sync log --commit 4f7c2a1
 - `--current` 先匹配当前业务项目 `HEAD` commit；如果没有结果，再回退到当前 branch。
 - 不带 selector 的 `log` 会按对话时间由近及远列出全部对话。
 - 普通输出类似 `git log`，显示 `Index`、`Title`、`Author`、`Date` 和同步说明；`Date` 优先使用 Codex 对话时间。
+- 默认 `log` 输出中的 `Index` 可以直接用 `git agent-sync restore --index <n>` 或 `git agent-sync restore --i <n>` 恢复。
 - `git agent-sync push --m "message"` 可以指定本次对话同步说明；`--json` 保持输出原始 binding 列表。
 
 也就是说，当你切换到某个历史 commit 或 branch 后，可以直接找回当时相关的 agent session。
@@ -212,18 +214,23 @@ git agent-sync log --commit 4f7c2a1
 ```bash
 git agent-sync restore --latest
 git agent-sync restore --latest 1
+git agent-sync restore --latest --index 1
 git agent-sync restore --current
 git agent-sync restore --current 1
 git agent-sync restore --branch main
 git agent-sync restore --branch main 2
 git agent-sync restore --commit 4f7c2a1
 git agent-sync restore --commit 4f7c2a1 3
+git agent-sync restore --index 1
+git agent-sync restore --i 1
 git agent-sync restore --all
 ```
 
 工具会从 sidecar store 读取 session 文件，并恢复到当前机器对应目录：
 
 - Codex：`~/.codex/sessions/...`
+
+不带 selector 时，`--index` / `--i` 使用默认 `git agent-sync log` 的编号。带 selector 时，编号只在该 selector 的输出范围内生效。
 
 Codex session 默认会在恢复时做轻量跨平台适配：
 
@@ -261,6 +268,7 @@ git agent-sync doctor
 - sidecar store 是否存在
 - sidecar remote 是否可达
 - sidecar 当前分支和 upstream
+- sidecar sparse checkout 是否启用
 - `manifest.json` 是否可读
 - `bindings.jsonl` 是否可读、有无坏行
 - Codex / Claude session 目录是否存在

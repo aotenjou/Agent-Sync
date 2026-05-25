@@ -107,6 +107,8 @@ git agent-sync scan [--json]
 git agent-sync push [--m <message>]
 git agent-sync pull
 git agent-sync restore <bundle-id>
+git agent-sync restore --index <n>
+git agent-sync restore --i <n>
 git agent-sync restore --all
 git agent-sync restore --latest
 git agent-sync restore --latest 1
@@ -182,6 +184,15 @@ git agent-sync show --latest 1
 
 Human-readable output is conversation-first and Git-log-like: it shows `Index`, `Title`, `Author`, `Date`, and the sync message. `Date` is the Codex conversation time when available, falling back to session file time. `--json` keeps returning the raw machine-readable bindings.
 
+The default log index is directly restorable:
+
+```bash
+git agent-sync restore --index 1
+git agent-sync restore --i 1
+```
+
+When a sidecar remote is configured, `pull` uses sparse checkout so the local `.agent-sync-store/` keeps only this project's full session bundle plus lightweight `manifest.json` files for other projects.
+
 Restore can use the same selectors:
 
 ```bash
@@ -195,12 +206,13 @@ When a selector matches multiple sessions, append the displayed number to restor
 
 ```bash
 git agent-sync restore --latest 1
+git agent-sync restore --latest --index 1
 git agent-sync restore --current 1
 git agent-sync restore --branch main 2
 git agent-sync restore --commit 4f7c2a1 3
 ```
 
-`--latest` matches the most recent sidecar sync batch. `--current` matches the current project `HEAD` commit, with branch fallback only when no commit binding exists. `--commit` matches the project commit recorded during sync. Branches are historical labels from sync time; they do not follow mutable branch pointers. Detached HEAD syncs store `branch: null` and remain queryable by commit.
+Without a selector, `--index` / `--i` uses the numbering from the default `git agent-sync log`. With a selector, the index is scoped to that selector's log output. `--latest` matches the most recent sidecar sync batch. `--current` matches the current project `HEAD` commit, with branch fallback only when no commit binding exists. `--commit` matches the project commit recorded during sync. Branches are historical labels from sync time; they do not follow mutable branch pointers. Detached HEAD syncs store `branch: null` and remain queryable by commit.
 
 ## Cross-Platform Restore Adaptation
 
@@ -337,7 +349,7 @@ Start with:
 git agent-sync doctor
 ```
 
-`doctor` reports whether the sidecar remote is reachable, whether the sidecar store is on the expected branch, whether `manifest.json` and `bindings.jsonl` are readable, and how many local agent session files are visible.
+`doctor` reports whether the sidecar remote is reachable, whether sparse checkout is enabled for the sidecar store, whether `manifest.json` and `bindings.jsonl` are readable, and how many local agent session files are visible.
 
 If `pull` says there is no remote, initialize again with a remote:
 

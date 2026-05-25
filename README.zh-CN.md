@@ -130,6 +130,8 @@ git agent-sync scan [--json]
 git agent-sync push [--m <message>]
 git agent-sync pull
 git agent-sync restore <bundle-id>
+git agent-sync restore --index <n>
+git agent-sync restore --i <n>
 git agent-sync restore --all
 git agent-sync restore --latest
 git agent-sync restore --latest 1
@@ -207,6 +209,15 @@ git agent-sync show --latest 1
 
 普通输出以对话为主，类似 `git log` 显示 `Index`、`Title`、`Author`、`Date` 和同步说明。`Date` 优先使用 Codex 对话时间，拿不到时再回退到 session 文件时间。`--json` 会保留机器可读的原始 binding 列表。
 
+默认 `log` 里的编号可以直接用来恢复：
+
+```bash
+git agent-sync restore --index 1
+git agent-sync restore --i 1
+```
+
+配置了 sidecar remote 时，`pull` 会启用 sparse checkout：本地 `.agent-sync-store/` 只完整展开当前项目的会话 bundle，其他项目只保留轻量 `manifest.json` 用于识别兼容项目。
+
 恢复命令也支持相同 selector：
 
 ```bash
@@ -220,12 +231,13 @@ git agent-sync restore --commit 4f7c2a1
 
 ```bash
 git agent-sync restore --latest 1
+git agent-sync restore --latest --index 1
 git agent-sync restore --current 1
 git agent-sync restore --branch main 2
 git agent-sync restore --commit 4f7c2a1 3
 ```
 
-`--latest` 匹配最近一次 sidecar 同步批次。`--current` 匹配当前业务项目 `HEAD` commit；如果没有 commit binding，再回退匹配当前 branch。`--commit` 匹配同步时记录的业务项目 commit。branch 只是同步发生时的历史标签，不代表会跟随可变分支指针。detached HEAD 同步时会记录 `branch: null`，仍然可以通过 commit 查询。
+不带 selector 时，`--index` / `--i` 使用默认 `git agent-sync log` 的编号。带 selector 时，编号只在该 selector 的输出范围内生效。`--latest` 匹配最近一次 sidecar 同步批次。`--current` 匹配当前业务项目 `HEAD` commit；如果没有 commit binding，再回退匹配当前 branch。`--commit` 匹配同步时记录的业务项目 commit。branch 只是同步发生时的历史标签，不代表会跟随可变分支指针。detached HEAD 同步时会记录 `branch: null`，仍然可以通过 commit 查询。
 
 ## 跨平台恢复适配
 
@@ -360,7 +372,7 @@ npm run test
 git agent-sync doctor
 ```
 
-`doctor` 会报告 sidecar remote 是否可达、sidecar store 是否在预期分支、`manifest.json` 和 `bindings.jsonl` 是否可读，以及当前能看到多少本地 agent session 文件。
+`doctor` 会报告 sidecar remote 是否可达、sidecar store 是否启用 sparse checkout、`manifest.json` 和 `bindings.jsonl` 是否可读，以及当前能看到多少本地 agent session 文件。
 
 如果 `pull` 提示没有 remote，重新初始化并传入远程仓库：
 

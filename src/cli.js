@@ -29,6 +29,7 @@ import {
   findProjectBundle,
   getManifestPath,
   getProjectBundleStagePath,
+  getStoreSparseStatus,
   pruneArchivedManifestEntries,
   pruneArchivedSidecarEntries,
   pruneForeignProjectSidecarEntries,
@@ -95,7 +96,7 @@ Usage:
   git agent-sync push [--m <message>]
   git agent-sync pull
   git agent-sync scan [--json]
-  git agent-sync restore <bundle-id>|--all|--latest|--current|--branch <name>|--commit <sha> [index|--index <n>] [--no-adapt] [--no-register]
+  git agent-sync restore <bundle-id>|--index <n>|--i <n>|--all|--latest|--current|--branch <name>|--commit <sha> [index] [--no-adapt] [--no-register]
   git agent-sync install-hooks
   git agent-sync uninstall-hooks
   git agent-sync doctor
@@ -140,6 +141,7 @@ Alias of status. Scans local Codex sessions without pushing.`,
 
 Browses recoverable Codex conversations.
 Aligns with: git log.
+Default Index values can be restored with git agent-sync restore --index <n>.
 Selectors:
   --latest       most recent sidecar sync batch
   --current      current project HEAD commit
@@ -167,13 +169,16 @@ Fast-forwards the sidecar repo from its remote.
 Run log or restore after pull to inspect or recover sessions.`,
     restore: `Usage:
   git agent-sync restore <bundle-id> [--no-adapt] [--no-register]
+  git agent-sync restore --index <n> [--no-adapt] [--no-register]
+  git agent-sync restore --i <n> [--no-adapt] [--no-register]
   git agent-sync restore --all [--no-adapt] [--no-register]
-  git agent-sync restore --latest [index|--index <n>] [--no-adapt] [--no-register]
-  git agent-sync restore --current [index|--index <n>] [--no-adapt] [--no-register]
-  git agent-sync restore --branch <name> [index|--index <n>] [--no-adapt] [--no-register]
-  git agent-sync restore --commit <sha> [index|--index <n>] [--no-adapt] [--no-register]
+  git agent-sync restore --latest [index|--index <n>|--i <n>] [--no-adapt] [--no-register]
+  git agent-sync restore --current [index|--index <n>|--i <n>] [--no-adapt] [--no-register]
+  git agent-sync restore --branch <name> [index|--index <n>|--i <n>] [--no-adapt] [--no-register]
+  git agent-sync restore --commit <sha> [index|--index <n>|--i <n>] [--no-adapt] [--no-register]
 
 Restores selected Codex snapshots into the local Codex sessions directory.
+Use --index/--i with the Index shown by the default log output.
 By default Codex restores are registered in state_5.sqlite/session_index.jsonl.
 Aligns with: git restore/checkout for local working context.`,
     "install-hooks": `Usage:
@@ -285,7 +290,7 @@ function showCommand(gitRoot, args, options) {
 function pushCommand(gitRoot, options = {}) {
   const config = readConfigWithBundle(gitRoot);
   ensureStoreRepo(config.storePath, config.remote);
-  syncStoreFromRemote(config.storePath, config.remote);
+  syncStoreFromRemote(config);
   adoptExistingProjectBundle(config);
   writeConfig(gitRoot, config);
   const gitContext = getGitContext(gitRoot);
@@ -327,7 +332,7 @@ function pullCommand(gitRoot) {
   const archiveInfo = getCodexArchiveInfo(getAgentRoot("codex"), { gitRoot });
 
   if (config.remote) {
-    const pulled = syncStoreFromRemote(config.storePath, config.remote);
+    const pulled = syncStoreFromRemote(config);
     if (!pulled) {
       console.log(`agent-sync: remote has no ${DEFAULT_STORE_BRANCH} branch yet; push from a machine with sessions first.`);
     }
@@ -473,6 +478,7 @@ function doctorCommand(gitRoot) {
     addCheck(checks, "store", existsSync(config.storePath) ? "ok" : "fail", existsSync(config.storePath) ? config.storePath : "missing");
     addCheck(checks, "remote", checkRemote(config), config.remote || "none");
     addCheck(checks, "store git", checkStoreGit(config), describeStoreGit(config));
+    addCheck(checks, "store sparse", checkStoreSparse(config), describeStoreSparse(config));
     addCheck(checks, "manifest", checkManifest(config), describeManifest(config));
     addCheck(checks, "bindings", checkBindings(config), describeBindings(config));
     addCheck(checks, "codex files", "ok", `${countAgentFiles(codexRoot, codexArchive)} file(s) visible, ${codexArchive.archivedPaths.size} archived skipped`);
@@ -516,6 +522,22 @@ function describeStoreGit(config) {
   const branch = getGitValue(["rev-parse", "--abbrev-ref", "HEAD"], config.storePath) || "unknown";
   const upstream = getGitValue(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], config.storePath) || "no upstream";
   return `${branch}, ${upstream}`;
+}
+
+function checkStoreSparse(config) {
+  if (!config.remote) {
+    return "warn";
+  }
+  const status = getStoreSparseStatus(config);
+  return status.enabled ? "ok" : "warn";
+}
+
+function describeStoreSparse(config) {
+  const status = getStoreSparseStatus(config);
+  if (!config.remote) {
+    return "disabled (no remote)";
+  }
+  return `${status.status}, cone ${status.cone || "unset"}, filter ${status.filter || "none"}`;
 }
 
 function checkManifest(config) {
@@ -629,6 +651,9 @@ function printBindings(config, bindings, selector) {
     console.log("");
   } else {
     console.log(`bindings: ${bindings.length}`);
+    console.log("restore:  git agent-sync restore --index <index>");
+    console.log("show:     git agent-sync show <bundle-id>");
+    console.log("");
   }
   bindings.forEach((binding, index) => {
     const title = getBindingTitle(config, binding, titles);
@@ -644,7 +669,7 @@ function printBindings(config, bindings, selector) {
     console.log("");
     console.log(`    Bundle: ${binding.bundleId}`);
     if (!selector) {
-      console.log(`    Restore: git agent-sync restore ${binding.bundleId}`);
+      console.log(`    Restore: git agent-sync restore --index ${index + 1}`);
       console.log(`    Show:    git agent-sync show ${binding.bundleId}`);
     }
   });

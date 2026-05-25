@@ -1,7 +1,7 @@
 import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentRoot } from "./agents.js";
-import { queryBindings } from "./bindings.js";
+import { queryBindings, readAllBindings } from "./bindings.js";
 import { parseSelector, formatSelector } from "./args.js";
 import { findProjectBundle } from "./store.js";
 import { adaptCodexSessionContent, getCodexContentProjectMatch, registerRestoredCodexSession } from "./codex-session.js";
@@ -11,9 +11,10 @@ export function restoreCommand(gitRoot, args, options, config) {
   const bundleId = args[0];
   const selector = parseSelector(options, { requireSelector: false });
   const selectorIndex = parseRestoreIndex(args, options, Boolean(selector));
-  const restoreModes = [Boolean(bundleId && !selector), Boolean(options.all), Boolean(selector)].filter(Boolean).length;
+  const logIndex = parseRestoreIndex([], options, false);
+  const restoreModes = [Boolean(bundleId && !selector), Boolean(options.all), Boolean(selector), Boolean(logIndex && !selector)].filter(Boolean).length;
   if (restoreModes !== 1) {
-    throw new Error("restore requires exactly one of a bundle id, --all, --latest, --current, --branch, or --commit");
+    throw new Error("restore requires exactly one of a bundle id, --all, --index, --latest, --current, --branch, or --commit");
   }
 
   if (selector) {
@@ -21,6 +22,15 @@ export function restoreCommand(gitRoot, args, options, config) {
     const matches = selectRestoreMatches(allMatches, selectorIndex, selector);
     if (!matches.length) {
       throw new Error(`no bindings found for ${formatSelector(selector)}`);
+    }
+    restoreMatches(config, matches, options);
+    return;
+  }
+
+  if (logIndex) {
+    const matches = selectRestoreMatches(readAllBindings(config), logIndex, null);
+    if (!matches.length) {
+      throw new Error("no bindings found for log");
     }
     restoreMatches(config, matches, options);
     return;
@@ -60,7 +70,8 @@ function selectRestoreMatches(matches, index, selector) {
     return matches;
   }
   if (index > matches.length) {
-    throw new Error(`restore index ${index} is out of range for ${formatSelector(selector)} (${matches.length} binding(s))`);
+    const scope = selector ? formatSelector(selector) : "log";
+    throw new Error(`restore index ${index} is out of range for ${scope} (${matches.length} binding(s))`);
   }
   return matches[index - 1] ? [matches[index - 1]] : [];
 }
