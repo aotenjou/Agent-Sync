@@ -95,6 +95,7 @@ git agent-sync uninstall-hooks
 ```bash
 git agent-sync init [--remote <url>|<url>] [--store <path>]
 git agent-sync status [--json]
+git agent-sync log [--json]
 git agent-sync log --latest [--json]
 git agent-sync log --current [--json]
 git agent-sync log --branch <name> [--json]
@@ -103,7 +104,7 @@ git agent-sync show <bundle-id>
 git agent-sync show --latest 1
 git agent-sync show --current 1
 git agent-sync scan [--json]
-git agent-sync push
+git agent-sync push [--m <message>]
 git agent-sync pull
 git agent-sync restore <bundle-id>
 git agent-sync restore --all
@@ -164,7 +165,14 @@ Each `push` writes a lightweight historical index at:
 
 The primary anchor is the business repo commit at `git agent-sync push` time. Codex session-internal `session_meta.payload.git.commit_hash` is only used for project ownership checks, not as the restore lookup commit.
 
+Use `--m` to set the conversation sync message written to the sidecar Git commit and the log entry:
+
 ```bash
+git agent-sync push --m "feat: add user login API"
+```
+
+```bash
+git agent-sync log
 git agent-sync log --latest
 git agent-sync log --current
 git agent-sync log --branch main
@@ -172,7 +180,7 @@ git agent-sync log --commit 4f7c2a1
 git agent-sync show --latest 1
 ```
 
-Human-readable output shows the conversation title first and numbers each result. `--json` keeps returning the raw machine-readable bindings.
+Human-readable output is conversation-first and Git-log-like: it shows `Index`, `Title`, `Author`, `Date`, and the sync message. `Date` is the Codex conversation time when available, falling back to session file time. `--json` keeps returning the raw machine-readable bindings.
 
 Restore can use the same selectors:
 

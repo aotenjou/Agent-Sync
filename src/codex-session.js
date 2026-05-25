@@ -1,7 +1,7 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { spawnSync } from "node:child_process";
+import Database from "better-sqlite3";
 import { expandHome, sha256, normalizePath, unique, writeFileAtomic } from "./utils.js";
 import { getGitContext, getProjectRemote, normalizeRemoteUrl } from "./git.js";
 
@@ -11,6 +11,7 @@ export function extractCodexSessionMetadata(content) {
   const metadata = {
     sessionId: null,
     title: null,
+    conversationAt: null,
     projectRoots: [],
     workdirs: [],
     gitContexts: []
@@ -28,6 +29,7 @@ export function extractCodexSessionMetadata(content) {
 
     if (item.type === "session_meta") {
       metadata.sessionId ||= payload.id || null;
+      metadata.conversationAt ||= parseCodexTimestamp(payload.timestamp);
       threadTitleCandidates.push(payload.thread_name, payload.title, payload.name);
       addPath(projectRoots, payload.cwd);
       if (payload.git && typeof payload.git === "object") {
@@ -135,11 +137,14 @@ export function applyCodexThreadMetadata(metadata, thread) {
     id: thread.id,
     rolloutPath: thread.rolloutPath,
     archived: thread.archived,
+    createdAt: thread.createdAt,
+    updatedAt: thread.updatedAt,
     cwd: thread.cwd,
     gitSha: thread.gitSha,
     gitBranch: thread.gitBranch,
     gitOriginUrl: thread.gitOriginUrl
   };
+  metadata.conversationAt = thread.updatedAt || thread.createdAt || metadata.conversationAt || null;
 
   const hasProjectOwnership = Boolean(thread.cwd || thread.gitOriginUrl || thread.gitSha || thread.gitBranch);
   if (hasProjectOwnership) {
@@ -161,6 +166,7 @@ export function createCodexThreadMetadata(thread) {
   return applyCodexThreadMetadata({
     sessionId: null,
     title: null,
+    conversationAt: null,
     projectRoots: [],
     workdirs: [],
     gitContexts: []
@@ -284,13 +290,11 @@ function loadCodexStateSnapshot(codexHome) {
     return cached.snapshot;
   }
 
-  const script = `import json, sqlite3, sys
-path = sys.argv[1]
-try:
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    cur = con.cursor()
-    cols = {row[1] for row in cur.execute("pragma table_info(threads)")}
-    wanted = [col for col in (
+  try {
+    const db = openReadonlyDatabase(statePath);
+    try {
+      const columns = getTableColumns(db, "threads");
+      const wanted = [
         "id",
         "title",
         "preview",
@@ -300,106 +304,90 @@ try:
         "git_branch",
         "git_origin_url",
         "rollout_path",
+        "created_at",
+        "updated_at",
+        "created_at_ms",
+        "updated_at_ms",
         "archived",
         "archived_at"
-    ) if col in cols]
-    if "id" in wanted:
-        query = "select " + ", ".join(wanted) + " from threads"
-        for row in cur.execute(query):
-            print(json.dumps(dict(zip(wanted, row)), ensure_ascii=False))
-except Exception:
-    raise
-`;
-  const result = runPythonSqlite(script, statePath);
-  if (result.error) {
-    const snapshot = { ok: false, status: `unavailable (${result.error.message})`, threads: [] };
+      ].filter((column) => columns.has(column));
+      const threads = wanted.includes("id")
+        ? db.prepare(`select ${wanted.map(quoteIdentifier).join(", ")} from ${quoteIdentifier("threads")}`).all()
+        : [];
+      const snapshot = { ok: true, status: "ok", threads };
+      codexStateCache.set(cacheKey, { signature, snapshot });
+      return snapshot;
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    const snapshot = { ok: false, status: `unavailable (${error.message})`, threads: [] };
     codexStateCache.set(cacheKey, { signature, snapshot });
     return snapshot;
   }
-  if (result.status !== 0) {
-    const message = (result.stderr || result.stdout || "").trim();
-    const snapshot = { ok: false, status: `unavailable (${message || `exit ${result.status}`})`, threads: [] };
-    codexStateCache.set(cacheKey, { signature, snapshot });
-    return snapshot;
-  }
-
-  const threads = [];
-  for (const line of result.stdout.split(/\r?\n/)) {
-    if (!line.trim()) {
-      continue;
-    }
-    try {
-      threads.push(JSON.parse(line));
-    } catch {
-      // Ignore partial SQLite rows.
-    }
-  }
-  const snapshot = { ok: true, status: "ok", threads };
-  codexStateCache.set(cacheKey, { signature, snapshot });
-  return snapshot;
 }
 
 function upsertCodexThread(codexHome, thread) {
   const statePath = join(codexHome, "state_5.sqlite");
-  const script = `import json, os, sqlite3, sys
-path = sys.argv[1]
-thread = json.loads(sys.stdin.read())
-os.makedirs(os.path.dirname(path), exist_ok=True)
-con = sqlite3.connect(path)
-cur = con.cursor()
-cur.execute("""CREATE TABLE IF NOT EXISTS threads (
-    id TEXT PRIMARY KEY,
-    rollout_path TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    source TEXT NOT NULL,
-    model_provider TEXT NOT NULL,
-    cwd TEXT NOT NULL,
-    title TEXT NOT NULL,
-    sandbox_policy TEXT NOT NULL,
-    approval_mode TEXT NOT NULL,
-    tokens_used INTEGER NOT NULL DEFAULT 0,
-    has_user_event INTEGER NOT NULL DEFAULT 0,
-    archived INTEGER NOT NULL DEFAULT 0,
-    archived_at INTEGER,
-    git_sha TEXT,
-    git_branch TEXT,
-    git_origin_url TEXT,
-    cli_version TEXT NOT NULL DEFAULT '',
-    first_user_message TEXT NOT NULL DEFAULT '',
-    agent_nickname TEXT,
-    agent_role TEXT,
-    memory_mode TEXT NOT NULL DEFAULT 'enabled',
-    model TEXT,
-    reasoning_effort TEXT,
-    agent_path TEXT,
-    created_at_ms INTEGER,
-    updated_at_ms INTEGER,
-    thread_source TEXT,
-    preview TEXT NOT NULL DEFAULT ''
-)""")
-cols = [row[1] for row in cur.execute("pragma table_info(threads)")]
-write_cols = [col for col in cols if col in thread]
-if "id" not in write_cols:
-    raise RuntimeError("threads table has no id column")
-placeholders = ", ".join(["?"] * len(write_cols))
-insert_cols = ", ".join(write_cols)
-updates = ", ".join([f"{col}=excluded.{col}" for col in write_cols if col != "id"])
-sql = f"INSERT INTO threads ({insert_cols}) VALUES ({placeholders})"
-if updates:
-    sql += f" ON CONFLICT(id) DO UPDATE SET {updates}"
-values = [thread[col] for col in write_cols]
-cur.execute(sql, values)
-con.commit()
-`;
-  const result = runPythonSqliteWithInput(script, statePath, JSON.stringify(thread));
-  if (result.error) {
-    return { ok: false, status: "unavailable", message: result.error.message };
+  try {
+    mkdirSync(codexHome, { recursive: true });
+    const db = new Database(statePath);
+    try {
+      db.pragma("journal_mode = WAL");
+      db.exec(`CREATE TABLE IF NOT EXISTS ${quoteIdentifier("threads")} (
+        id TEXT PRIMARY KEY,
+        rollout_path TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        model_provider TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        title TEXT NOT NULL,
+        sandbox_policy TEXT NOT NULL,
+        approval_mode TEXT NOT NULL,
+        tokens_used INTEGER NOT NULL DEFAULT 0,
+        has_user_event INTEGER NOT NULL DEFAULT 0,
+        archived INTEGER NOT NULL DEFAULT 0,
+        archived_at INTEGER,
+        git_sha TEXT,
+        git_branch TEXT,
+        git_origin_url TEXT,
+        cli_version TEXT NOT NULL DEFAULT '',
+        first_user_message TEXT NOT NULL DEFAULT '',
+        agent_nickname TEXT,
+        agent_role TEXT,
+        memory_mode TEXT NOT NULL DEFAULT 'enabled',
+        model TEXT,
+        reasoning_effort TEXT,
+        agent_path TEXT,
+        created_at_ms INTEGER,
+        updated_at_ms INTEGER,
+        thread_source TEXT,
+        preview TEXT NOT NULL DEFAULT ''
+      )`);
+      const columns = getTableColumns(db, "threads");
+      const writeCols = [...columns].filter((column) => Object.prototype.hasOwnProperty.call(thread, column));
+      if (!writeCols.includes("id")) {
+        throw new Error("threads table has no id column");
+      }
+      const insertCols = writeCols.map(quoteIdentifier).join(", ");
+      const placeholders = writeCols.map((column) => `@${column}`).join(", ");
+      const updates = writeCols
+        .filter((column) => column !== "id")
+        .map((column) => `${quoteIdentifier(column)}=excluded.${quoteIdentifier(column)}`)
+        .join(", ");
+      const sql = `INSERT INTO ${quoteIdentifier("threads")} (${insertCols}) VALUES (${placeholders})${updates ? ` ON CONFLICT(id) DO UPDATE SET ${updates}` : ""}`;
+      const row = Object.fromEntries(writeCols.map((column) => [column, thread[column]]));
+      db.transaction(() => {
+        db.prepare(sql).run(row);
+      })();
+    } finally {
+      db.close();
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, status: "unavailable", message: error.message };
   }
-  if (result.status !== 0) {
-    return { ok: false, status: `exit ${result.status}`, message: (result.stderr || result.stdout || "").trim() };
-  }
-  return { ok: true };
 }
 
 function upsertCodexSessionIndex(codexHome, entry) {
@@ -456,6 +444,14 @@ function getSessionCreatedAtMs(sessionMeta, now) {
   return Number.isFinite(timestamp) ? timestamp : now;
 }
 
+function parseCodexTimestamp(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
 function getRestoreGitContext(gitRoot) {
   try {
     return getGitContext(gitRoot);
@@ -479,23 +475,6 @@ function stringifyJsonValue(value) {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 
-function runPythonSqlite(script, statePath) {
-  return runPythonSqliteWithInput(script, statePath, "");
-}
-
-function runPythonSqliteWithInput(script, statePath, input) {
-  for (const command of ["python3", "python"]) {
-    const result = spawnSync(command, ["-c", script, statePath], {
-      input,
-      encoding: "utf8"
-    });
-    if (!result.error && result.status === 0) {
-      return result;
-    }
-  }
-  return { stdout: "", status: 1, error: new Error("python-unavailable") };
-}
-
 function getCodexStateSignature(statePath) {
   try {
     const stat = existsSync(statePath) ? readStateStat(statePath) : null;
@@ -503,6 +482,25 @@ function getCodexStateSignature(statePath) {
   } catch {
     return { exists: false };
   }
+}
+
+function openReadonlyDatabase(path) {
+  return new Database(path, {
+    readonly: true,
+    fileMustExist: true
+  });
+}
+
+function getTableColumns(db, table) {
+  try {
+    return new Set(db.prepare(`pragma table_info(${quoteIdentifier(table)})`).all().map((row) => row.name));
+  } catch {
+    return new Set();
+  }
+}
+
+function quoteIdentifier(value) {
+  return `"${String(value).replaceAll('"', '""')}"`;
 }
 
 function readStateStat(statePath) {
@@ -520,9 +518,13 @@ function sameCodexStateSignature(a, b) {
 
 function normalizeCodexThread(item) {
   const archivedAt = Number(item.archived_at || 0);
+  const createdAt = normalizeCodexThreadTime(item.created_at_ms, item.created_at);
+  const updatedAt = normalizeCodexThreadTime(item.updated_at_ms, item.updated_at);
   return {
     id: item.id || null,
     title: chooseFirstTitle([item.title, item.preview, item.first_user_message]),
+    createdAt,
+    updatedAt,
     cwd: normalizeSessionPathOrNull(item.cwd),
     gitSha: item.git_sha || null,
     gitBranch: item.git_branch || null,
@@ -530,6 +532,18 @@ function normalizeCodexThread(item) {
     rolloutPath: normalizeOptionalPath(item.rollout_path),
     archived: Number(item.archived || 0) === 1 || archivedAt > 0
   };
+}
+
+function normalizeCodexThreadTime(msValue, secondsValue) {
+  const ms = Number(msValue);
+  if (Number.isFinite(ms) && ms > 0) {
+    return new Date(ms).toISOString();
+  }
+  const seconds = Number(secondsValue);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return new Date(seconds * 1000).toISOString();
+  }
+  return null;
 }
 
 export function getCodexProjectMatch(metadata, config, projectRemote = getConfigRemoteIdentity(config)) {

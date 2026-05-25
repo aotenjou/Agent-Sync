@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { spawnSync } from "node:child_process";
+import Database from "better-sqlite3";
 import {
   adaptCodexSessionContent,
   cleanCodexTitle,
@@ -127,10 +127,9 @@ writeFileSync(join(codexHome, "session_index.jsonl"), `${JSON.stringify({
   thread_name: "Index title"
 })}\n`);
 const statePath = join(codexHome, "state_5.sqlite");
-const sqlite = spawnSync("python3", ["-", statePath], {
-  input: `import sqlite3, sys
-con = sqlite3.connect(sys.argv[1])
-con.execute("""create table threads (
+{
+  const db = new Database(statePath);
+  db.exec(`create table threads (
     id text primary key,
     rollout_path text not null,
     title text not null,
@@ -142,51 +141,48 @@ con.execute("""create table threads (
     git_origin_url text,
     archived integer not null default 0,
     archived_at integer
-)""")
-con.execute("insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("state-session", "/tmp/state-session.jsonl", "State title", "Preview fallback", "First fallback", "/tmp/MokioAgent", "state-sha", "main", "https://github.com/Wood-Q/MokioAgent.git", 0, None))
-con.execute("insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("preview-session", "/tmp/preview-session.jsonl", "", "Preview title", "First fallback", "/tmp/MokioAgent", None, None, None, 0, None))
-con.execute("insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("first-session", "/tmp/first-session.jsonl", "", "", "Traceback (most recent call last):\\\\nFile \\"bad.py\\"\\\\n修改一下报错", "/tmp/MokioAgent", None, None, None, 0, None))
-con.execute("insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("state-wins-session", "/tmp/state-wins-session.jsonl", "State wins", "Index should not overwrite", "First fallback", "/tmp/MokioAgent", None, None, None, 0, None))
-con.execute("insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("foreign-state-session", "/tmp/foreign-state-session.jsonl", "Foreign state", "", "", "/tmp/Agent-Sync", "foreign-sha", "main", "https://github.com/Wood-Q/Agent-Sync.git", 0, None))
-con.execute("insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("archived-session", "/tmp/archived-session.jsonl", "Archived", "", "", "/tmp/MokioAgent", None, None, None, 1, 123))
-con.commit()
-`,
-  encoding: "utf8"
-});
-if (sqlite.status === 0) {
-  writeFileSync(join(codexHome, "session_index.jsonl"), `${JSON.stringify({
-    id: "state-wins-session",
-    thread_name: "Index should not overwrite"
-  })}\n${readFileSync(join(codexHome, "session_index.jsonl"), "utf8")}`);
-  const titles = loadCodexSessionTitles(codexHome);
-  assert.equal(titles.get("state-session"), "State title");
-  assert.equal(titles.get("preview-session"), "Preview title");
-  assert.equal(titles.get("first-session"), "修改一下报错");
-  assert.equal(titles.get("state-wins-session"), "State wins");
-  assert.equal(titles.get("index-session"), "Index title");
-
-  const threadIndex = loadCodexThreadIndex(codexHome);
-  const stateThread = threadIndex.byId.get("state-session");
-  assert.equal(stateThread.title, "State title");
-  assert.equal(stateThread.cwd, "/tmp/MokioAgent");
-  assert.equal(stateThread.gitSha, "state-sha");
-  assert.equal(stateThread.gitOriginUrl, "https://github.com/Wood-Q/MokioAgent.git");
-  const archiveInfo = getCodexThreadArchiveInfo(codexHome);
-  assert.equal(archiveInfo.status, "ok");
-  assert.deepEqual(archiveInfo.paths, ["/tmp/archived-session.jsonl"]);
-
-  const foreignStateMetadata = extractCodexSessionMetadata(makeSession({
-    name: "foreign-state",
-    root: targetRoot,
-    shell: "zsh",
-    cmd: "pwd"
-  }));
-  foreignStateMetadata.sessionId = "foreign-state-session";
-  applyCodexThreadMetadata(foreignStateMetadata, threadIndex.byId.get("foreign-state-session"));
-  const stateMatch = getCodexProjectMatch(foreignStateMetadata, mokioConfig);
-  assert.equal(stateMatch.matched, false);
-  assert.equal(stateMatch.reason, "codex:foreign-git");
+)`);
+  const insert = db.prepare("insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  insert.run("state-session", "/tmp/state-session.jsonl", "State title", "Preview fallback", "First fallback", "/tmp/MokioAgent", "state-sha", "main", "https://github.com/Wood-Q/MokioAgent.git", 0, null);
+  insert.run("preview-session", "/tmp/preview-session.jsonl", "", "Preview title", "First fallback", "/tmp/MokioAgent", null, null, null, 0, null);
+  insert.run("first-session", "/tmp/first-session.jsonl", "", "", "Traceback (most recent call last):\\nFile \"bad.py\"\\n修改一下报错", "/tmp/MokioAgent", null, null, null, 0, null);
+  insert.run("state-wins-session", "/tmp/state-wins-session.jsonl", "State wins", "Index should not overwrite", "First fallback", "/tmp/MokioAgent", null, null, null, 0, null);
+  insert.run("foreign-state-session", "/tmp/foreign-state-session.jsonl", "Foreign state", "", "", "/tmp/Agent-Sync", "foreign-sha", "main", "https://github.com/Wood-Q/Agent-Sync.git", 0, null);
+  insert.run("archived-session", "/tmp/archived-session.jsonl", "Archived", "", "", "/tmp/MokioAgent", null, null, null, 1, 123);
+  db.close();
 }
+writeFileSync(join(codexHome, "session_index.jsonl"), `${JSON.stringify({
+  id: "state-wins-session",
+  thread_name: "Index should not overwrite"
+})}\n${readFileSync(join(codexHome, "session_index.jsonl"), "utf8")}`);
+const titles = loadCodexSessionTitles(codexHome);
+assert.equal(titles.get("state-session"), "State title");
+assert.equal(titles.get("preview-session"), "Preview title");
+assert.equal(titles.get("first-session"), "修改一下报错");
+assert.equal(titles.get("state-wins-session"), "State wins");
+assert.equal(titles.get("index-session"), "Index title");
+
+const threadIndex = loadCodexThreadIndex(codexHome);
+const stateThread = threadIndex.byId.get("state-session");
+assert.equal(stateThread.title, "State title");
+assert.equal(stateThread.cwd, "/tmp/MokioAgent");
+assert.equal(stateThread.gitSha, "state-sha");
+assert.equal(stateThread.gitOriginUrl, "https://github.com/Wood-Q/MokioAgent.git");
+const archiveInfo = getCodexThreadArchiveInfo(codexHome);
+assert.equal(archiveInfo.status, "ok");
+assert.deepEqual(archiveInfo.paths, ["/tmp/archived-session.jsonl"]);
+
+const foreignStateMetadata = extractCodexSessionMetadata(makeSession({
+  name: "foreign-state",
+  root: targetRoot,
+  shell: "zsh",
+  cmd: "pwd"
+}));
+foreignStateMetadata.sessionId = "foreign-state-session";
+applyCodexThreadMetadata(foreignStateMetadata, threadIndex.byId.get("foreign-state-session"));
+const stateMatch = getCodexProjectMatch(foreignStateMetadata, mokioConfig);
+assert.equal(stateMatch.matched, false);
+assert.equal(stateMatch.reason, "codex:foreign-git");
 
 const fallbackMetadata = extractCodexSessionMetadata([
   {
@@ -243,20 +239,15 @@ assert.match(readFileSync(join(restoreHome, "session_index.jsonl"), "utf8"), /Re
 
 const minimalHome = mkdtempSync(join(tmpdir(), "agent-sync-codex-minimal-"));
 const minimalState = join(minimalHome, "state_5.sqlite");
-const minimalSqlite = spawnSync("python3", ["-", minimalState], {
-  input: `import sqlite3, sys
-con = sqlite3.connect(sys.argv[1])
-con.execute("create table threads (id text primary key, rollout_path text not null, title text not null)")
-con.commit()
-`,
-  encoding: "utf8"
-});
-if (minimalSqlite.status === 0) {
-  const minimalRegister = registerRestoredCodexSession(restoreContent, join(minimalHome, "sessions", "restore.jsonl"), restoreConfig, {}, join(minimalHome, "sessions"));
-  assert.equal(minimalRegister.registered, true);
-  const minimalThread = readCodexThread(minimalHome, "restore-session");
-  assert.equal(minimalThread.title, "Fix restore session");
+{
+  const db = new Database(minimalState);
+  db.exec("create table threads (id text primary key, rollout_path text not null, title text not null)");
+  db.close();
 }
+const minimalRegister = registerRestoredCodexSession(restoreContent, join(minimalHome, "sessions", "restore.jsonl"), restoreConfig, {}, join(minimalHome, "sessions"));
+assert.equal(minimalRegister.registered, true);
+const minimalThread = readCodexThread(minimalHome, "restore-session");
+assert.equal(minimalThread.title, "Fix restore session");
 
 console.log("codex session path adaptation test passed");
 
@@ -316,17 +307,10 @@ function parseJsonl(content) {
 }
 
 function readCodexThread(codexHome, id) {
-  const result = spawnSync("python3", ["-", join(codexHome, "state_5.sqlite"), id], {
-    input: `import json, sqlite3, sys
-con = sqlite3.connect(sys.argv[1])
-con.row_factory = sqlite3.Row
-row = con.execute("select * from threads where id = ?", (sys.argv[2],)).fetchone()
-print(json.dumps(dict(row), ensure_ascii=False) if row else "{}")
-`,
-    encoding: "utf8"
-  });
-  if (result.status !== 0) {
-    throw new Error(result.stderr || "failed to read fake Codex state");
+  const db = new Database(join(codexHome, "state_5.sqlite"), { readonly: true, fileMustExist: true });
+  try {
+    return db.prepare("select * from threads where id = ?").get(id) || {};
+  } finally {
+    db.close();
   }
-  return JSON.parse(result.stdout);
 }

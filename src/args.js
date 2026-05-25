@@ -23,6 +23,12 @@ export function parseArgs(rawArgs) {
       options.noAdapt = true;
     } else if (arg === "--no-register") {
       options.noRegister = true;
+    } else if (arg.startsWith("--m=")) {
+      options.message = arg.slice("--m=".length);
+    } else if (arg === "--m" || arg === "-m" || arg === "--message") {
+      options.message = rawArgs[++i];
+    } else if (arg.startsWith("--message=")) {
+      options.message = arg.slice("--message=".length);
     } else if (arg.startsWith("--index=")) {
       options.index = arg.slice("--index=".length);
     } else if (arg === "--index") {

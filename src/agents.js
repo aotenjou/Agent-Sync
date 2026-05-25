@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { getCodexArchiveInfo, isArchivedCodexSessionPath, summarizeCodexArchiveInfo } from "./codex-archive.js";
 import { getProjectRemote, normalizeRemoteUrl } from "./git.js";
 import {
+  applyCodexThreadMetadata,
   createCodexThreadMetadata,
   extractCodexSessionMetadata,
   getCodexProjectMatch,
@@ -40,7 +41,7 @@ export function scanSessions(gitRoot, config, archiveInfo = null) {
     skipped: 0
   };
   const matches = candidates
-    .map((candidate) => scanCandidate(candidate, cache, stats, config, projectRemote, codexTitles))
+    .map((candidate) => scanCandidate(candidate, cache, stats, config, projectRemote, codexTitles, codexThreadIndex))
     .filter((match) => match)
     .sort((a, b) => a.agent.localeCompare(b.agent) || a.originalPath.localeCompare(b.originalPath));
   writeScanCache(gitRoot, cache);
@@ -154,7 +155,7 @@ function fileSignature(path) {
   }
 }
 
-function scanCandidate(candidate, cache, stats, config, projectRemote, codexTitles) {
+function scanCandidate(candidate, cache, stats, config, projectRemote, codexTitles, codexThreadIndex) {
   const stat = getCandidateStat(candidate);
   if (!stat) {
     return null;
@@ -171,7 +172,7 @@ function scanCandidate(candidate, cache, stats, config, projectRemote, codexTitl
 
   stats.refreshed += 1;
   const content = safeRead(candidate.path);
-  const metadata = candidate.agent === "codex" ? getCodexCandidateMetadata(candidate, content, codexTitles) : null;
+  const metadata = candidate.agent === "codex" ? getCodexCandidateMetadata(candidate, content, codexTitles, codexThreadIndex) : null;
   if (metadata && !metadata.title && metadata.sessionId && codexTitles.has(metadata.sessionId)) {
     metadata.title = codexTitles.get(metadata.sessionId);
   }
@@ -195,9 +196,11 @@ function scanCandidate(candidate, cache, stats, config, projectRemote, codexTitl
   return match;
 }
 
-function getCodexCandidateMetadata(candidate, content, codexTitles) {
+function getCodexCandidateMetadata(candidate, content, codexTitles, codexThreadIndex) {
   if (!candidate.thread) {
-    return extractCodexSessionMetadata(content);
+    const metadata = extractCodexSessionMetadata(content);
+    const thread = metadata.sessionId ? codexThreadIndex.byId.get(metadata.sessionId) : null;
+    return thread ? applyCodexThreadMetadata(metadata, thread) : metadata;
   }
   const metadata = createCodexThreadMetadata(candidate.thread);
   if (!metadata.title) {

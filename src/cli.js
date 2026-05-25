@@ -11,7 +11,7 @@ import {
 } from "./constants.js";
 import { parseArgs, parseSelector, formatSelector } from "./args.js";
 import { getAgentRoot, scanSessions } from "./agents.js";
-import { getBindingsPath, inspectBindings, queryBindings, writeBindings } from "./bindings.js";
+import { getBindingsPath, inspectBindings, queryBindings, readAllBindings, writeBindings } from "./bindings.js";
 import { cleanCodexTitle, extractCodexSessionMetadata, loadCodexSessionTitles } from "./codex-session.js";
 import {
   legacyProjectIdForPath,
@@ -62,7 +62,7 @@ export async function main(argv) {
     status: () => statusCommand(gitRoot, options),
     log: () => logCommand(gitRoot, options),
     show: () => showCommand(gitRoot, args, options),
-    push: () => pushCommand(gitRoot),
+    push: () => pushCommand(gitRoot, options),
     pull: () => pullCommand(gitRoot),
     scan: () => scanCommand(gitRoot, options),
     "install-hooks": () => installHooksCommand(gitRoot),
@@ -90,9 +90,9 @@ function printHelp(command = null) {
 Usage:
   git agent-sync init [--remote <url>|<url>] [--store <path>]
   git agent-sync status [--json]
-  git agent-sync log --latest|--current|--branch <name>|--commit <sha> [--json]
+  git agent-sync log [--latest|--current|--branch <name>|--commit <sha>] [--json]
   git agent-sync show <bundle-id>|--latest <index>|--current <index>|--branch <name> <index>|--commit <sha> <index> [--json]
-  git agent-sync push
+  git agent-sync push [--m <message>]
   git agent-sync pull
   git agent-sync scan [--json]
   git agent-sync restore <bundle-id>|--all|--latest|--current|--branch <name>|--commit <sha> [index|--index <n>] [--no-adapt] [--no-register]
@@ -101,7 +101,7 @@ Usage:
   git agent-sync doctor
 
 Git-style behavior:
-  - log browses Codex session snapshots, like git log
+  - log browses Codex conversations, like git log
   - show prints one snapshot detail, like git show <object>
   - restore writes selected snapshots back into your local agent directory
   - latest means the most recent sidecar sync batch
@@ -132,12 +132,13 @@ Scans local Codex sessions and reports which files match this Git project.`,
 
 Alias of status. Scans local Codex sessions without pushing.`,
     log: `Usage:
+  git agent-sync log [--json]
   git agent-sync log --latest [--json]
   git agent-sync log --current [--json]
   git agent-sync log --branch <name> [--json]
   git agent-sync log --commit <sha> [--json]
 
-Browses recoverable Codex session snapshots.
+Browses recoverable Codex conversations.
 Aligns with: git log.
 Selectors:
   --latest       most recent sidecar sync batch
@@ -154,9 +155,10 @@ Selectors:
 Prints one Codex session snapshot detail without restoring it.
 Aligns with: git show <object>.`,
     push: `Usage:
-  git agent-sync push
+  git agent-sync push [--m <message>]
 
 Copies matching Codex session snapshots into the sidecar repo and commits them.
+Use --m to set the sidecar commit message for this sync.
 Aligns with: git push. The sidecar commit records the current project HEAD commit.`,
     pull: `Usage:
   git agent-sync pull
@@ -252,8 +254,8 @@ function scanCommand(gitRoot, options) {
 
 function logCommand(gitRoot, options) {
   const config = readConfigWithBundle(gitRoot);
-  const selector = parseSelector(options, { requireSelector: true });
-  const bindings = queryBindings(config, selector, gitRoot);
+  const selector = parseSelector(options, { requireSelector: false });
+  const bindings = selector ? queryBindings(config, selector, gitRoot) : readAllBindings(config);
 
   if (options.json) {
     console.log(JSON.stringify(bindings, null, 2));
@@ -280,7 +282,7 @@ function showCommand(gitRoot, args, options) {
   printBindingDetail(config, match);
 }
 
-function pushCommand(gitRoot) {
+function pushCommand(gitRoot, options = {}) {
   const config = readConfigWithBundle(gitRoot);
   ensureStoreRepo(config.storePath, config.remote);
   syncStoreFromRemote(config.storePath, config.remote);
@@ -296,16 +298,20 @@ function pushCommand(gitRoot) {
   const foreignPruned = pruneForeignProjectSidecarEntries(config);
   const copied = copyMatchesToStore(config, scan, archiveInfo);
   writeManifest(config, scan, gitContext);
-  const bindingsAdded = writeBindings(config, scan.matches, gitContext, syncRunId);
+  const commitMessage = getPushCommitMessage(config, gitContext, options);
+  const author = getProjectGitAuthor(gitRoot);
+  const bindingsAdded = writeBindings(config, scan.matches, gitContext, syncRunId, {
+    message: commitMessage,
+    authorName: author.name,
+    authorEmail: author.email
+  });
 
   stageProjectBundle(config);
   const diff = runGit(["diff", "--cached", "--quiet"], config.storePath, { allowFail: true });
   if (diff.status === 0) {
     console.log(`agent-sync: no sidecar changes (${copied.length} matched sessions, ${pruned.removedFiles} archived removed, ${foreignPruned.removedFiles} foreign removed).`);
   } else {
-    const shortCommit = gitContext.headCommit.slice(0, 12);
-    const branch = gitContext.branch || "detached";
-    runGit(["commit", "-m", `sync ${config.projectName} Codex sessions at ${shortCommit} (${branch})`], config.storePath);
+    runGit(["-c", `user.name=${author.name}`, "-c", `user.email=${author.email}`, "commit", "-m", commitMessage], config.storePath);
     console.log(`agent-sync: committed ${copied.length} matched session file(s), ${bindingsAdded} new binding(s), ${pruned.removedFiles} archived removed, ${foreignPruned.removedFiles} foreign removed.`);
   }
 
@@ -429,6 +435,26 @@ function commitStoreCleanup(config, archivedPruned, manifestPruned, foreignPrune
 
 function stageProjectBundle(config) {
   runGit(["add", "--", ".gitignore", getProjectBundleStagePath(config)], config.storePath);
+}
+
+function getPushCommitMessage(config, gitContext, options) {
+  if (Object.prototype.hasOwnProperty.call(options, "message")) {
+    const message = String(options.message ?? "").trim();
+    if (!message) {
+      throw new Error("push --m requires a non-empty message");
+    }
+    return message;
+  }
+  const shortCommit = gitContext.headCommit.slice(0, 12);
+  const branch = gitContext.branch || "detached";
+  return `sync ${config.projectName} Codex sessions at ${shortCommit} (${branch})`;
+}
+
+function getProjectGitAuthor(gitRoot) {
+  return {
+    name: getGitValue(["config", "user.name"], gitRoot) || "agent-sync",
+    email: getGitValue(["config", "user.email"], gitRoot) || "agent-sync@example.invalid"
+  };
 }
 
 function doctorCommand(gitRoot) {
@@ -595,19 +621,32 @@ function printScan(scan, config) {
 
 function printBindings(config, bindings, selector) {
   const titles = loadCodexSessionTitles();
-  console.log(`selector: ${formatSelector(selector)}`);
-  console.log(`bindings: ${bindings.length}`);
-  if (bindings.length) {
+  if (selector) {
+    console.log(`selector: ${formatSelector(selector)}`);
+    console.log(`bindings: ${bindings.length}`);
     console.log(`restore:  git agent-sync restore ${formatSelectorForCommand(selector)} <index>`);
     console.log(`show:     git agent-sync show ${formatSelectorForCommand(selector)} <index>`);
+    console.log("");
+  } else {
+    console.log(`bindings: ${bindings.length}`);
   }
   bindings.forEach((binding, index) => {
-    const branch = binding.projectBranch || "detached";
-    const dirty = binding.projectDirty ? "dirty" : "clean";
     const title = getBindingTitle(config, binding, titles);
-    console.log(`${index + 1}. ${title}`);
-    console.log(`   ${binding.bundleId} ${binding.agent} ${binding.projectCommit || "no-commit"} ${branch} ${dirty}`);
-    console.log(`   ${binding.originalPath}`);
+    if (index > 0) {
+      console.log("");
+    }
+    console.log(`Index: ${index + 1}`);
+    console.log(`Title: ${title}`);
+    console.log(`Author: ${binding.authorName || "agent-sync"} <${binding.authorEmail || "agent-sync@example.invalid"}>`);
+    console.log(`Date:   ${formatGitDate(binding.conversationAt || binding.syncedAt || binding.boundAt)}`);
+    console.log("");
+    console.log(`    ${binding.commitMessage || fallbackBindingCommitMessage(config, binding)}`);
+    console.log("");
+    console.log(`    Bundle: ${binding.bundleId}`);
+    if (!selector) {
+      console.log(`    Restore: git agent-sync restore ${binding.bundleId}`);
+      console.log(`    Show:    git agent-sync show ${binding.bundleId}`);
+    }
   });
 }
 
@@ -735,4 +774,32 @@ function isLowSignalTitle(value) {
 
 function compactTitle(value) {
   return value.replace(/\s+/g, " ").trim().slice(0, 96);
+}
+
+function fallbackBindingCommitMessage(config, binding) {
+  const shortCommit = binding.projectCommit ? binding.projectCommit.slice(0, 12) : "no-head";
+  const branch = binding.projectBranch || "detached";
+  return `sync ${config.projectName || "project"} Codex sessions at ${shortCommit} (${branch})`;
+}
+
+function formatGitDate(value) {
+  const date = value ? new Date(value) : new Date(0);
+  if (!Number.isFinite(date.getTime())) {
+    return "unknown";
+  }
+  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absOffset = Math.abs(offsetMinutes);
+  const offset = `${sign}${String(Math.floor(absOffset / 60)).padStart(2, "0")}${String(absOffset % 60).padStart(2, "0")}`;
+  return `${weekdays[date.getDay()]} ${months[date.getMonth()]} ${String(date.getDate()).padStart(2, " ")} ${formatTimePart(date)} ${date.getFullYear()} ${offset}`;
+}
+
+function formatTimePart(date) {
+  return [
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds()
+  ].map((value) => String(value).padStart(2, "0")).join(":");
 }

@@ -186,6 +186,7 @@ git agent-sync pull
 拉取后可以查询：
 
 ```bash
+git agent-sync log
 git agent-sync log --latest
 git agent-sync log --current
 git agent-sync log --branch main
@@ -198,7 +199,9 @@ git agent-sync log --commit 4f7c2a1
 - `--commit <sha>` 匹配同步时记录的业务项目 commit，支持短 SHA。
 - `--branch <name>` 匹配同步时记录的业务项目 branch 标签，不解析当前分支指针。
 - `--current` 先匹配当前业务项目 `HEAD` commit；如果没有结果，再回退到当前 branch。
-- 普通输出会显示会话标题并加编号，方便后续指定恢复；`--json` 保持输出原始 binding 列表。
+- 不带 selector 的 `log` 会按对话时间由近及远列出全部对话。
+- 普通输出类似 `git log`，显示 `Index`、`Title`、`Author`、`Date` 和同步说明；`Date` 优先使用 Codex 对话时间。
+- `git agent-sync push --m "message"` 可以指定本次对话同步说明；`--json` 保持输出原始 binding 列表。
 
 也就是说，当你切换到某个历史 commit 或 branch 后，可以直接找回当时相关的 agent session。
 

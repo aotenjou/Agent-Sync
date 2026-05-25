@@ -5,8 +5,10 @@ import { getGitContext } from "./git.js";
 import { readJson, writeJson } from "./utils.js";
 
 const BINDINGS_INDEX_VERSION = 1;
+const DEFAULT_AUTHOR_NAME = "agent-sync";
+const DEFAULT_AUTHOR_EMAIL = "agent-sync@example.invalid";
 
-export function writeBindings(config, matches, gitContext, syncRunId = createSyncRunId(gitContext)) {
+export function writeBindings(config, matches, gitContext, syncRunId = createSyncRunId(gitContext), commitInfo = {}) {
   const codexMatches = matches.filter((match) => match.agent === "codex");
   if (!codexMatches.length) {
     return 0;
@@ -34,6 +36,10 @@ export function writeBindings(config, matches, gitContext, syncRunId = createSyn
       agent: "codex",
       sessionId: match.metadata?.sessionId || null,
       title: match.metadata?.title || null,
+      conversationAt: match.metadata?.conversationAt || match.modifiedAt || syncedAt,
+      commitMessage: commitInfo.message || defaultCommitMessage(config, gitContext),
+      authorName: commitInfo.authorName || DEFAULT_AUTHOR_NAME,
+      authorEmail: commitInfo.authorEmail || DEFAULT_AUTHOR_EMAIL,
       sha256: match.sha256,
       storeRelativePath: match.storeRelativePath,
       originalPath: match.originalPath,
@@ -110,6 +116,10 @@ function readBindings(config) {
   return inspectBindings(config).bindings;
 }
 
+export function readAllBindings(config) {
+  return dedupeBindings(readBindings(config).filter((binding) => binding.agent === "codex"), "all");
+}
+
 export function queryBindings(config, selector, gitRoot) {
   const bindings = readBindings(config).filter((binding) => binding.agent === "codex");
   if (selector.type === "latest") {
@@ -160,7 +170,8 @@ function filterBindingsByLatestSync(bindings) {
 function dedupeBindings(bindings, mode) {
   const seen = new Set();
   const result = [];
-  for (const binding of bindings) {
+  const sortedBindings = [...bindings].sort(compareBindingsByConversationTime);
+  for (const binding of sortedBindings) {
     const key = mode === "commit"
       ? `${binding.sessionId || binding.bundleId}:${binding.projectCommit}:${binding.bundleId}`
       : `${binding.sessionId || binding.bundleId}:${binding.bundleId}`;
@@ -169,10 +180,12 @@ function dedupeBindings(bindings, mode) {
       result.push(binding);
     }
   }
-  return result.sort((a, b) => {
-    const time = String(b.syncedAt || b.boundAt || "").localeCompare(String(a.syncedAt || a.boundAt || ""));
-    return time || a.bundleId.localeCompare(b.bundleId);
-  });
+  return result;
+}
+
+function compareBindingsByConversationTime(a, b) {
+  const time = String(b.conversationAt || b.syncedAt || b.boundAt || "").localeCompare(String(a.conversationAt || a.syncedAt || a.boundAt || ""));
+  return time || a.bundleId.localeCompare(b.bundleId);
 }
 
 function matchesCommit(value, query) {
@@ -271,6 +284,10 @@ function normalizeBinding(binding) {
     agent: binding.agent || null,
     sessionId: binding.sessionId || null,
     title: binding.title || null,
+    conversationAt: binding.conversationAt || binding.modifiedAt || binding.syncedAt || binding.boundAt || null,
+    commitMessage: binding.commitMessage || null,
+    authorName: binding.authorName || DEFAULT_AUTHOR_NAME,
+    authorEmail: binding.authorEmail || DEFAULT_AUTHOR_EMAIL,
     sha256: binding.sha256 || null,
     storeRelativePath: binding.storeRelativePath || null,
     originalPath: binding.originalPath || null,
@@ -290,4 +307,10 @@ function normalizeBinding(binding) {
 
 function createSyncRunId(gitContext) {
   return `${new Date().toISOString()}:${gitContext.headCommit || "no-head"}`;
+}
+
+function defaultCommitMessage(config, gitContext) {
+  const shortCommit = gitContext.headCommit ? gitContext.headCommit.slice(0, 12) : "no-head";
+  const branch = gitContext.branch || "detached";
+  return `sync ${config.projectName || "project"} Codex sessions at ${shortCommit} (${branch})`;
 }

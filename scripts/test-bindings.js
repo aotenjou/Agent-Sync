@@ -47,16 +47,22 @@ const added = writeBindings(config, [{
   storeRelativePath: "projects/project/codex/codex-2.jsonl",
   originalPath: "~/.codex/sessions/2.jsonl",
   agentRelativePath: "2.jsonl",
+  modifiedAt: "2026-05-25T01:00:00.000Z",
   metadata: {
     sessionId: "session-2",
-    title: "second"
+    title: "second",
+    conversationAt: "2026-05-25T02:00:00.000Z"
   }
 }], {
   branch: "main",
   headCommit: "def456",
   baseCommit: "def456",
   dirty: false
-}, "run-2");
+}, "run-2", {
+  message: "feat: add user login API",
+  authorName: "Agent Sync Test",
+  authorEmail: "test@example.invalid"
+});
 
 assert.equal(added, 1);
 const after = readFileSync(join(projectDir, "bindings.jsonl"), "utf8");
@@ -66,5 +72,9 @@ assert.equal(existsSync(join(projectDir, "bindings.idx.json")), true);
 const indexedLatest = queryBindings(config, { type: "latest" }, process.cwd());
 assert.equal(indexedLatest.length, 1);
 assert.equal(indexedLatest[0].bundleId, "codex-2");
+assert.equal(indexedLatest[0].commitMessage, "feat: add user login API");
+assert.equal(indexedLatest[0].authorName, "Agent Sync Test");
+assert.equal(indexedLatest[0].authorEmail, "test@example.invalid");
+assert.equal(indexedLatest[0].conversationAt, "2026-05-25T02:00:00.000Z");
 
 console.log("bindings v2 test passed");

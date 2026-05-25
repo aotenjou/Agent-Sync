@@ -118,6 +118,7 @@ git agent-sync uninstall-hooks
 ```bash
 git agent-sync init [--remote <url>|<url>] [--store <path>]
 git agent-sync status [--json]
+git agent-sync log [--json]
 git agent-sync log --latest [--json]
 git agent-sync log --current [--json]
 git agent-sync log --branch <name> [--json]
@@ -126,7 +127,7 @@ git agent-sync show <bundle-id>
 git agent-sync show --latest 1
 git agent-sync show --current 1
 git agent-sync scan [--json]
-git agent-sync push
+git agent-sync push [--m <message>]
 git agent-sync pull
 git agent-sync restore <bundle-id>
 git agent-sync restore --all
@@ -187,9 +188,16 @@ git agent-sync doctor
 
 主要锚点是执行 `git agent-sync push` 时的业务仓库 commit。Codex session 内部的 `session_meta.payload.git.commit_hash` 只用于判断项目归属，不再作为恢复查询的主 commit。
 
+可以用 `--m` 指定本次对话同步说明；它会写入 sidecar Git commit，也会显示在 `log` 里：
+
+```bash
+git agent-sync push --m "feat: add user login API"
+```
+
 为了避免不同项目的对话互相污染，Codex session 只使用结构化项目身份判断归属：`repository_url` 必须匹配当前业务仓库 remote，且 `cwd` / `workdir` 不能混入其他项目路径。已经明确属于其他 Git 仓库、其他项目路径、同一个 session 同时跨多个项目 workdir，或者完全缺少结构化项目身份的记录，即使正文里提到当前项目名，也不会被 `push`、`pull` 清理后的 manifest、或者 `restore` 接受。
 
 ```bash
+git agent-sync log
 git agent-sync log --latest
 git agent-sync log --current
 git agent-sync log --branch main
@@ -197,7 +205,7 @@ git agent-sync log --commit 4f7c2a1
 git agent-sync show --latest 1
 ```
 
-普通输出会把会话标题放在最前面，并为每条结果加上编号，方便从结果里挑一个恢复。`--json` 会保留机器可读的原始 binding 列表。
+普通输出以对话为主，类似 `git log` 显示 `Index`、`Title`、`Author`、`Date` 和同步说明。`Date` 优先使用 Codex 对话时间，拿不到时再回退到 session 文件时间。`--json` 会保留机器可读的原始 binding 列表。
 
 恢复命令也支持相同 selector：
 

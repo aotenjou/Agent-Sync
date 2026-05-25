@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFi
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
+import Database from "better-sqlite3";
 
 const repoRoot = process.cwd();
 const cli = join(repoRoot, "bin", "git-agent-sync.js");
@@ -21,6 +22,8 @@ const codexCommit = join(base, "codex-commit");
 const claudeA = join(base, "claude-a");
 const claudeB = join(base, "claude-b");
 const windowsRoot = `C:\\Users\\woodq\\FullStack\\${projectName}`;
+const pushMessage = "feat: add user login API";
+const conversationAtMs = Date.parse("2026-05-23T02:14:00.000Z");
 
 mkdirSync(machineA, { recursive: true });
 mkdirSync(machineBParent, { recursive: true });
@@ -82,7 +85,7 @@ writeJsonl(sessionPath, [
   }
 ]);
 writeCodexState(codexA, [
-  ["session-current", "Continue e2e session", "Preview should not win", "First message should not win"]
+  ["session-current", "Continue e2e session", "Preview should not win", "First message should not win", conversationAtMs - 3600000, conversationAtMs]
 ]);
 writeJsonl(foreignSessionPath, [
   {
@@ -123,14 +126,15 @@ writeJsonl(archivedPath, [
   { type: "turn_context", payload: { cwd: windowsRoot } }
 ]);
 
-const pushOut = agent(projectA, codexA, claudeA, ["push"]);
+const pushOut = agent(projectA, codexA, claudeA, ["push", "--m", pushMessage]);
 assert.match(pushOut, /1 matched session file\(s\), 1 new binding\(s\)/);
 assert.match(pushOut, /archived removed/);
 assert.equal(run("git", ["status", "--porcelain", "--", ".agent-sync-store"], projectA), "");
 assert.equal(run("git", ["status", "--porcelain"], projectA), "");
 assert.equal(run("git", ["ls-files", ".agent-sync-store"], projectA), "");
 assert.equal(run("git", ["grep", "-n", "Agent-Sync", "HEAD", "--", "projects"], join(projectA, ".agent-sync-store"), { allowFail: true }), "");
-assert.match(run("git", ["log", "-1", "--pretty=%s"], join(projectA, ".agent-sync-store")), new RegExp(`sync ${projectName} Codex sessions at ${currentCommit.slice(0, 12)}`));
+assert.equal(run("git", ["log", "-1", "--pretty=%s"], join(projectA, ".agent-sync-store")), pushMessage);
+assert.equal(run("git", ["log", "-1", "--pretty=%an <%ae>"], join(projectA, ".agent-sync-store")), "Agent Sync Test <test@example.invalid>");
 
 run("git", ["clone", bareProjectRemote, projectB], machineBParent);
 agent(projectB, codexB, claudeB, ["init", "--remote", bareStoreRemote]);
@@ -148,10 +152,27 @@ assert.equal(byCommit.length, 1);
 assert.equal(existsSync(join(projectB, ".agent-sync-store", "projects", byCurrent[0].projectId, "bindings.idx.json")), true);
 assert.equal(byCurrent[0].title, "Continue e2e session");
 assert.equal(byCurrent[0].projectCommit, currentCommit);
+assert.equal(byCurrent[0].commitMessage, pushMessage);
+assert.equal(byCurrent[0].authorName, "Agent Sync Test");
+assert.equal(byCurrent[0].authorEmail, "test@example.invalid");
+assert.equal(byCurrent[0].conversationAt, new Date(conversationAtMs).toISOString());
 assert.match(readFileSync(join(projectB, ".agent-sync-store", byCurrent[0].storeRelativePath), "utf8"), /session-current/);
 
+const defaultLogOut = agent(projectB, codexB, claudeB, ["log"]);
+assert.match(defaultLogOut, /Index: 1/);
+assert.match(defaultLogOut, /Title: Continue e2e session/);
+assert.match(defaultLogOut, /Author: Agent Sync Test <test@example.invalid>/);
+assert.match(defaultLogOut, /Date:\s+Sat May 23 10:14:00 2026 \+0800/);
+assert.match(defaultLogOut, new RegExp(`\\s{4}${pushMessage}`));
+assert.match(defaultLogOut, new RegExp(`Restore: git agent-sync restore ${byCurrent[0].bundleId}`));
+const allJson = JSON.parse(agent(projectB, codexB, claudeB, ["log", "--json"]));
+assert.equal(allJson.length, 1);
+assert.equal(allJson[0].bundleId, byCurrent[0].bundleId);
+
 const logOut = agent(projectB, codexB, claudeB, ["log", "--current"]);
-assert.match(logOut, /1\. Continue e2e session/);
+assert.match(logOut, /Index: 1/);
+assert.match(logOut, /Title: Continue e2e session/);
+assert.match(logOut, new RegExp(`\\s{4}${pushMessage}`));
 assert.match(logOut, /restore:\s+git agent-sync restore --current <index>/);
 assert.match(logOut, /show:\s+git agent-sync show --current <index>/);
 
@@ -201,7 +222,8 @@ console.log(JSON.stringify({ base, currentCommit }, null, 2));
 function agent(cwd, codexDir, claudeDir, args) {
   return run(process.execPath, [cli, ...args], cwd, {
     AGENT_SYNC_CODEX_DIR: codexDir,
-    AGENT_SYNC_CLAUDE_DIR: claudeDir
+    AGENT_SYNC_CLAUDE_DIR: claudeDir,
+    TZ: "Asia/Shanghai"
   });
 }
 
@@ -232,49 +254,31 @@ function writeJsonl(path, items) {
 }
 
 function writeCodexState(codexHome, rows) {
-  const result = spawnSync("python3", ["-", join(codexHome, "state_5.sqlite")], {
-    input: `import sqlite3, sys
-con = sqlite3.connect(sys.argv[1])
-con.execute("create table threads (id text primary key, title text not null, preview text not null, first_user_message text not null)")
-for row in ${JSON.stringify(rows)}:
-    con.execute("insert into threads values (?, ?, ?, ?)", row)
-con.commit()
-`,
-    encoding: "utf8"
-  });
-  if (result.status !== 0) {
-    throw new Error(result.stderr || "failed to create fake Codex state");
+  const db = new Database(join(codexHome, "state_5.sqlite"));
+  db.exec("create table threads (id text primary key, title text not null, preview text not null, first_user_message text not null, created_at_ms integer, updated_at_ms integer)");
+  const insert = db.prepare("insert into threads values (?, ?, ?, ?, ?, ?)");
+  for (const row of rows) {
+    insert.run(...row);
   }
+  db.close();
 }
 
 function readCodexThread(codexHome, id) {
-  const result = spawnSync("python3", ["-", join(codexHome, "state_5.sqlite"), id], {
-    input: `import json, sqlite3, sys
-con = sqlite3.connect(sys.argv[1])
-con.row_factory = sqlite3.Row
-row = con.execute("select * from threads where id = ?", (sys.argv[2],)).fetchone()
-print(json.dumps(dict(row), ensure_ascii=False) if row else "{}")
-`,
-    encoding: "utf8"
-  });
-  if (result.status !== 0) {
-    throw new Error(result.stderr || "failed to read fake Codex state");
+  const db = new Database(join(codexHome, "state_5.sqlite"), { readonly: true, fileMustExist: true });
+  try {
+    return db.prepare("select * from threads where id = ?").get(id) || {};
+  } finally {
+    db.close();
   }
-  return JSON.parse(result.stdout);
 }
 
 function readCodexThreadCount(codexHome, id) {
-  const result = spawnSync("python3", ["-", join(codexHome, "state_5.sqlite"), id], {
-    input: `import sqlite3, sys
-con = sqlite3.connect(sys.argv[1])
-print(con.execute("select count(*) from threads where id = ?", (sys.argv[2],)).fetchone()[0])
-`,
-    encoding: "utf8"
-  });
-  if (result.status !== 0) {
-    throw new Error(result.stderr || "failed to count fake Codex state");
+  const db = new Database(join(codexHome, "state_5.sqlite"), { readonly: true, fileMustExist: true });
+  try {
+    return db.prepare("select count(*) as count from threads where id = ?").get(id).count;
+  } finally {
+    db.close();
   }
-  return Number(result.stdout.trim());
 }
 
 function parseJsonl(content) {
